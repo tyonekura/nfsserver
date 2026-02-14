@@ -108,12 +108,12 @@ void NfsServer::proc_write(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     auto data = args.decode_opaque();
 
     uint32_t written = 0;
-    NfsStat3 status = vfs_.write(fh, offset, data.data(), data.size(), written);
+    NfsStat3 status = vfs_.write(fh, offset, data.data(), count, written);
     reply.encode_uint32(static_cast<uint32_t>(status));
     encode_wcc_data(reply, fh);
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_uint32(written);
-        reply.encode_uint32(FILE_SYNC); // committed as FILE_SYNC
+        reply.encode_uint32(stable); // echo back requested stability
         // write verifier
         reply.encode_uint64(write_verifier_);
     }
@@ -281,7 +281,7 @@ void NfsServer::proc_readdirplus(const RpcCallHeader&, XdrDecoder& args, XdrEnco
     uint64_t cookie = args.decode_uint64();
     args.decode_uint64(); // cookieverf
     uint32_t dircount = args.decode_uint32();
-    uint32_t maxcount = args.decode_uint32();
+    args.decode_uint32(); // maxcount (unused in simplified implementation)
 
     std::vector<DirEntry> entries;
     bool eof = false;

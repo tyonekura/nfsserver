@@ -353,7 +353,7 @@ NfsStat3 LocalFs::fsstat(const FileHandle& fh, uint64_t& total_bytes,
     return NfsStat3::NFS3_OK;
 }
 
-NfsStat3 LocalFs::fsinfo(const FileHandle& fh, uint32_t& rtmax, uint32_t& rtpref,
+NfsStat3 LocalFs::fsinfo(const FileHandle& /*fh*/, uint32_t& rtmax, uint32_t& rtpref,
                            uint32_t& wtmax, uint32_t& wtpref, uint32_t& dtpref,
                            uint64_t& maxfilesize) {
     rtmax = 1048576;    // 1 MB
@@ -365,14 +365,14 @@ NfsStat3 LocalFs::fsinfo(const FileHandle& fh, uint32_t& rtmax, uint32_t& rtpref
     return NfsStat3::NFS3_OK;
 }
 
-NfsStat3 LocalFs::pathconf(const FileHandle& fh, uint32_t& linkmax,
+NfsStat3 LocalFs::pathconf(const FileHandle& /*fh*/, uint32_t& linkmax,
                              uint32_t& name_max) {
     linkmax = 32000;
     name_max = 255;
     return NfsStat3::NFS3_OK;
 }
 
-NfsStat3 LocalFs::commit(const FileHandle& fh, uint64_t offset, uint32_t count) {
+NfsStat3 LocalFs::commit(const FileHandle& fh, uint64_t /*offset*/, uint32_t /*count*/) {
     std::string path = resolve_path(fh);
     if (path.empty()) return NfsStat3::NFS3ERR_STALE;
 
