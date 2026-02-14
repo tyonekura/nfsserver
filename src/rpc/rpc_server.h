@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -46,12 +47,15 @@ private:
     RpcCallHeader decode_call_header(XdrDecoder& dec);
     void send_accepted_reply(int fd, uint32_t xid, RpcAcceptStatus status,
                              const XdrEncoder& body);
-    void send_tcp(int fd, const uint8_t* data, size_t len);
+    void send_denied_reply(int fd, uint32_t xid, RpcRejectStatus reject_stat,
+                           uint32_t low_ver, uint32_t high_ver);
+    bool send_tcp(int fd, const uint8_t* data, size_t len);
 
     // Key: {program, version}
     std::map<std::pair<uint32_t, uint32_t>, RpcProgramHandlers> programs_;
 
     std::atomic<bool> running_{false};
+    std::mutex threads_mu_;
     std::vector<std::thread> threads_;
     int listen_fd_ = -1;
 };

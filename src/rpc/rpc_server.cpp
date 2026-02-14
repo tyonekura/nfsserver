@@ -2,6 +2,7 @@
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <cstring>
 #include <iostream>
@@ -24,6 +25,7 @@ void RpcServer::start(uint16_t port) {
 
     int opt = 1;
     setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(listen_fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -37,7 +39,10 @@ void RpcServer::start(uint16_t port) {
         throw std::runtime_error("listen() failed: " + std::string(strerror(errno)));
 
     running_ = true;
-    threads_.emplace_back(&RpcServer::accept_loop, this, listen_fd_);
+    {
+        std::lock_guard<std::mutex> lk(threads_mu_);
+        threads_.emplace_back(&RpcServer::accept_loop, this, listen_fd_);
+    }
 
     std::cout << "RPC server listening on port " << port << std::endl;
 }
@@ -49,11 +54,15 @@ void RpcServer::stop() {
         close(listen_fd_);
         listen_fd_ = -1;
     }
-    for (auto& t : threads_) {
+    std::vector<std::thread> to_join;
+    {
+        std::lock_guard<std::mutex> lk(threads_mu_);
+        to_join = std::move(threads_);
+    }
+    for (auto& t : to_join) {
         if (t.joinable())
             t.join();
     }
-    threads_.clear();
 }
 
 void RpcServer::accept_loop(int listen_fd) {
@@ -67,35 +76,49 @@ void RpcServer::accept_loop(int listen_fd) {
             if (!running_) break;
             continue;
         }
-        // Handle each client in a new thread.
-        threads_.emplace_back(&RpcServer::handle_client, this, client_fd);
+
+        int opt = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+        {
+            std::lock_guard<std::mutex> lk(threads_mu_);
+            threads_.emplace_back(&RpcServer::handle_client, this, client_fd);
+        }
     }
 }
 
 void RpcServer::handle_client(int client_fd) {
-    // TCP record marking: each record is prefixed with a 4-byte header.
-    // Bit 31 = last fragment flag, bits 0-30 = fragment length.
     while (running_) {
-        uint8_t hdr[4];
-        ssize_t n = recv(client_fd, hdr, 4, MSG_WAITALL);
-        if (n <= 0) break;
+        // Reassemble multi-fragment RPC records (RFC 5531 §11)
+        std::vector<uint8_t> record;
+        bool complete = false;
 
-        uint32_t raw = (static_cast<uint32_t>(hdr[0]) << 24) |
-                       (static_cast<uint32_t>(hdr[1]) << 16) |
-                       (static_cast<uint32_t>(hdr[2]) << 8) |
-                       static_cast<uint32_t>(hdr[3]);
-        // bool last_fragment = (raw & 0x80000000) != 0;
-        uint32_t frag_len = raw & 0x7FFFFFFF;
+        while (!complete) {
+            uint8_t hdr[4];
+            ssize_t n = recv(client_fd, hdr, 4, MSG_WAITALL);
+            if (n <= 0) { close(client_fd); return; }
 
-        if (frag_len > 1024 * 1024) {
-            break; // reject oversized fragments
+            uint32_t raw = (static_cast<uint32_t>(hdr[0]) << 24) |
+                           (static_cast<uint32_t>(hdr[1]) << 16) |
+                           (static_cast<uint32_t>(hdr[2]) << 8) |
+                           static_cast<uint32_t>(hdr[3]);
+            bool last_fragment = (raw & 0x80000000) != 0;
+            uint32_t frag_len = raw & 0x7FFFFFFF;
+
+            if (frag_len > 1024 * 1024) { close(client_fd); return; }
+
+            size_t old_size = record.size();
+            record.resize(old_size + frag_len);
+            n = recv(client_fd, record.data() + old_size, frag_len, MSG_WAITALL);
+            if (n <= 0) { close(client_fd); return; }
+
+            complete = last_fragment;
+
+            // Guard against unbounded accumulation
+            if (record.size() > 16 * 1024 * 1024) { close(client_fd); return; }
         }
 
-        std::vector<uint8_t> buf(frag_len);
-        n = recv(client_fd, buf.data(), frag_len, MSG_WAITALL);
-        if (n <= 0) break;
-
-        process_rpc_message(buf.data(), buf.size(), client_fd);
+        process_rpc_message(record.data(), record.size(), client_fd);
     }
     close(client_fd);
 }
@@ -148,8 +171,7 @@ void RpcServer::process_rpc_message(const uint8_t* data, size_t len, int client_
     }
 
     if (call.rpc_version != 2) {
-        XdrEncoder body;
-        send_accepted_reply(client_fd, call.xid, RpcAcceptStatus::SYSTEM_ERR, body);
+        send_denied_reply(client_fd, call.xid, RpcRejectStatus::RPC_MISMATCH, 2, 2);
         return;
     }
 
@@ -200,12 +222,33 @@ void RpcServer::send_accepted_reply(int fd, uint32_t xid,
         reply.encode_opaque_fixed(bdata.data(), bdata.size());
     }
 
-    send_tcp(fd, reply.data().data(), reply.size());
+    if (!send_tcp(fd, reply.data().data(), reply.size())) {
+        std::cerr << "send_tcp failed for xid " << xid << std::endl;
+    }
 }
 
-void RpcServer::send_tcp(int fd, const uint8_t* data, size_t len) {
+void RpcServer::send_denied_reply(int fd, uint32_t xid,
+                                   RpcRejectStatus reject_stat,
+                                   uint32_t low_ver, uint32_t high_ver) {
+    XdrEncoder reply;
+    reply.encode_uint32(xid);
+    reply.encode_uint32(static_cast<uint32_t>(RpcMsgType::REPLY));
+    reply.encode_uint32(static_cast<uint32_t>(RpcReplyStatus::MSG_DENIED));
+    reply.encode_uint32(static_cast<uint32_t>(reject_stat));
+    if (reject_stat == RpcRejectStatus::RPC_MISMATCH) {
+        reply.encode_uint32(low_ver);
+        reply.encode_uint32(high_ver);
+    }
+
+    if (!send_tcp(fd, reply.data().data(), reply.size())) {
+        std::cerr << "send_tcp failed for xid " << xid << std::endl;
+    }
+}
+
+bool RpcServer::send_tcp(int fd, const uint8_t* data, size_t len) {
     // TCP record marking: last-fragment bit set
     uint32_t hdr = htonl(static_cast<uint32_t>(len) | 0x80000000);
-    send(fd, &hdr, 4, MSG_NOSIGNAL);
-    send(fd, data, len, MSG_NOSIGNAL);
+    if (send(fd, &hdr, 4, MSG_NOSIGNAL) != 4) return false;
+    ssize_t sent = send(fd, data, len, MSG_NOSIGNAL);
+    return sent == static_cast<ssize_t>(len);
 }
