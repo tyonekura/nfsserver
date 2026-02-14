@@ -2,6 +2,25 @@
 #include "nfs/nfs_types.h"
 #include <cstring>
 
+NfsServer::Sattr3 NfsServer::decode_sattr3(XdrDecoder& args) {
+    Sattr3 sa;
+    if (args.decode_bool()) sa.mode = args.decode_uint32();
+    if (args.decode_bool()) sa.uid = args.decode_uint32();
+    if (args.decode_bool()) sa.gid = args.decode_uint32();
+    if (args.decode_bool()) sa.size = args.decode_uint64();
+    sa.atime.how = static_cast<NfsTimeSet::How>(args.decode_uint32());
+    if (sa.atime.how == NfsTimeSet::How::SET_TO_CLIENT_TIME) {
+        sa.atime.time.seconds = args.decode_uint32();
+        sa.atime.time.nseconds = args.decode_uint32();
+    }
+    sa.mtime.how = static_cast<NfsTimeSet::How>(args.decode_uint32());
+    if (sa.mtime.how == NfsTimeSet::How::SET_TO_CLIENT_TIME) {
+        sa.mtime.time.seconds = args.decode_uint32();
+        sa.mtime.time.nseconds = args.decode_uint32();
+    }
+    return sa;
+}
+
 void NfsServer::proc_null(const RpcCallHeader&, XdrDecoder&, XdrEncoder&) {
     // No-op.
 }
@@ -18,33 +37,35 @@ void NfsServer::proc_getattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
 
 void NfsServer::proc_setattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
+    Sattr3 sa = decode_sattr3(args);
 
-    // Decode sattr3: each field has a "set_it" bool.
-    uint32_t mode = UINT32_MAX, uid = UINT32_MAX, gid = UINT32_MAX;
-    uint64_t size = UINT64_MAX;
-
-    if (args.decode_bool()) mode = args.decode_uint32();
-    if (args.decode_bool()) uid = args.decode_uint32();
-    if (args.decode_bool()) gid = args.decode_uint32();
-    if (args.decode_bool()) size = args.decode_uint64();
-    // atime
-    NfsTimeSet atime;
-    atime.how = static_cast<NfsTimeSet::How>(args.decode_uint32());
-    if (atime.how == NfsTimeSet::How::SET_TO_CLIENT_TIME) {
-        atime.time.seconds = args.decode_uint32();
-        atime.time.nseconds = args.decode_uint32();
-    }
-    // mtime
-    NfsTimeSet mtime;
-    mtime.how = static_cast<NfsTimeSet::How>(args.decode_uint32());
-    if (mtime.how == NfsTimeSet::How::SET_TO_CLIENT_TIME) {
-        mtime.time.seconds = args.decode_uint32();
-        mtime.time.nseconds = args.decode_uint32();
-    }
     // guard (sattrguard3)
-    if (args.decode_bool()) { args.decode_uint32(); args.decode_uint32(); }
+    bool check_guard = args.decode_bool();
+    uint32_t guard_sec = 0, guard_nsec = 0;
+    if (check_guard) {
+        guard_sec = args.decode_uint32();
+        guard_nsec = args.decode_uint32();
+    }
 
-    NfsStat3 status = vfs_.setattr(fh, mode, uid, gid, size, atime, mtime);
+    // Check guard before applying changes
+    if (check_guard) {
+        Fattr3 current;
+        NfsStat3 s = vfs_.getattr(fh, current);
+        if (s != NfsStat3::NFS3_OK) {
+            reply.encode_uint32(static_cast<uint32_t>(s));
+            encode_wcc_data(reply, fh);
+            return;
+        }
+        if (current.ctime.seconds != guard_sec ||
+            current.ctime.nseconds != guard_nsec) {
+            reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_NOT_SYNC));
+            encode_wcc_data(reply, fh);
+            return;
+        }
+    }
+
+    NfsStat3 status = vfs_.setattr(fh, sa.mode, sa.uid, sa.gid, sa.size,
+                                    sa.atime, sa.mtime);
     reply.encode_uint32(static_cast<uint32_t>(status));
     encode_wcc_data(reply, fh);
 }
@@ -115,6 +136,13 @@ void NfsServer::proc_write(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     uint32_t stable = args.decode_uint32();
     auto data = args.decode_opaque();
 
+    // Validate count against data length
+    if (data.size() < count) {
+        reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_INVAL));
+        encode_wcc_data(reply, fh);
+        return;
+    }
+
     uint32_t written = 0;
     NfsStat3 status = vfs_.write(fh, offset, data.data(), count, written);
     reply.encode_uint32(static_cast<uint32_t>(status));
@@ -122,7 +150,6 @@ void NfsServer::proc_write(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_uint32(written);
         reply.encode_uint32(stable); // echo back requested stability
-        // write verifier
         reply.encode_uint64(write_verifier_);
     }
 }
@@ -134,17 +161,23 @@ void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
 
     uint32_t mode = 0644;
     if (createmode != EXCLUSIVE) {
-        // Decode sattr3 (simplified: just get mode if set)
-        if (args.decode_bool()) mode = args.decode_uint32();
-        // Skip uid, gid, size, atime, mtime
-        if (args.decode_bool()) args.decode_uint32(); // uid
-        if (args.decode_bool()) args.decode_uint32(); // gid
-        if (args.decode_bool()) args.decode_uint64(); // size
-        uint32_t at = args.decode_uint32(); if (at == 2) { args.decode_uint32(); args.decode_uint32(); }
-        uint32_t mt = args.decode_uint32(); if (mt == 2) { args.decode_uint32(); args.decode_uint32(); }
+        Sattr3 sa = decode_sattr3(args);
+        if (sa.mode != UINT32_MAX) mode = sa.mode;
     } else {
-        // createverf3: 8 bytes
+        // createverf3: 8 bytes (consumed but not used for now)
         args.decode_uint64();
+    }
+
+    // For GUARDED mode, check if file already exists
+    if (createmode == GUARDED) {
+        FileHandle existing_fh;
+        Fattr3 existing_attr;
+        NfsStat3 lookup_stat = vfs_.lookup(dir_fh, name, existing_fh, existing_attr);
+        if (lookup_stat == NfsStat3::NFS3_OK) {
+            reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_EXIST));
+            encode_wcc_data(reply, dir_fh);
+            return;
+        }
     }
 
     FileHandle out_fh;
@@ -166,14 +199,8 @@ void NfsServer::proc_mkdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
 
-    uint32_t mode = 0755;
-    if (args.decode_bool()) mode = args.decode_uint32();
-    // Skip remaining sattr3 fields
-    if (args.decode_bool()) args.decode_uint32(); // uid
-    if (args.decode_bool()) args.decode_uint32(); // gid
-    if (args.decode_bool()) args.decode_uint64(); // size
-    uint32_t at = args.decode_uint32(); if (at == 2) { args.decode_uint32(); args.decode_uint32(); }
-    uint32_t mt = args.decode_uint32(); if (mt == 2) { args.decode_uint32(); args.decode_uint32(); }
+    Sattr3 sa = decode_sattr3(args);
+    uint32_t mode = (sa.mode != UINT32_MAX) ? sa.mode : 0755u;
 
     FileHandle out_fh;
     Fattr3 out_attr;
@@ -191,13 +218,7 @@ void NfsServer::proc_mkdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
 void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
-    // sattr3 (skip)
-    if (args.decode_bool()) args.decode_uint32(); // mode
-    if (args.decode_bool()) args.decode_uint32(); // uid
-    if (args.decode_bool()) args.decode_uint32(); // gid
-    if (args.decode_bool()) args.decode_uint64(); // size
-    uint32_t at = args.decode_uint32(); if (at == 2) { args.decode_uint32(); args.decode_uint32(); }
-    uint32_t mt = args.decode_uint32(); if (mt == 2) { args.decode_uint32(); args.decode_uint32(); }
+    decode_sattr3(args); // sattr3 for symlink (not applied)
     std::string target = args.decode_string();
 
     FileHandle out_fh;
@@ -215,8 +236,20 @@ void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
 
 void NfsServer::proc_mknod(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
-    std::string name = args.decode_string();
-    // Not fully implemented - return NOTSUPP
+    args.decode_string(); // name
+
+    // Fully consume mknoddata3 to leave decoder in clean state
+    uint32_t ftype = args.decode_uint32();
+    if (ftype == static_cast<uint32_t>(Ftype3::NF3CHR) ||
+        ftype == static_cast<uint32_t>(Ftype3::NF3BLK)) {
+        decode_sattr3(args);
+        args.decode_uint32(); // specdata major
+        args.decode_uint32(); // specdata minor
+    } else if (ftype == static_cast<uint32_t>(Ftype3::NF3SOCK) ||
+               ftype == static_cast<uint32_t>(Ftype3::NF3FIFO)) {
+        decode_sattr3(args);
+    }
+
     reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_NOTSUPP));
     encode_wcc_data(reply, dir_fh);
 }
@@ -303,8 +336,7 @@ void NfsServer::proc_readdirplus(const RpcCallHeader&, XdrDecoder& args, XdrEnco
             reply.encode_uint64(e.fileid);
             reply.encode_string(e.name);
             reply.encode_uint64(e.cookie);
-            // name_attributes (post_op_attr): try to get attrs
-            // For simplicity, encode false (no attributes)
+            // name_attributes (post_op_attr): simplified, no attributes
             reply.encode_bool(false);
             // name_handle (post_op_fh3): false
             reply.encode_bool(false);
@@ -343,10 +375,10 @@ void NfsServer::proc_fsinfo(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_uint32(rtmax);
         reply.encode_uint32(rtpref);
-        reply.encode_uint32(rtmax);   // rtmult
+        reply.encode_uint32(4096);    // rtmult: filesystem block size
         reply.encode_uint32(wtmax);
         reply.encode_uint32(wtpref);
-        reply.encode_uint32(wtmax);   // wtmult
+        reply.encode_uint32(4096);    // wtmult: filesystem block size
         reply.encode_uint32(dtpref);
         reply.encode_uint64(maxfilesize);
         // time_delta
@@ -367,10 +399,10 @@ void NfsServer::proc_pathconf(const RpcCallHeader&, XdrDecoder& args, XdrEncoder
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_uint32(linkmax);
         reply.encode_uint32(name_max);
-        reply.encode_bool(true);  // no_trunc
-        reply.encode_bool(true);  // chown_restricted
-        reply.encode_bool(true);  // case_insensitive (false on Linux, true for simplicity)
-        reply.encode_bool(true);  // case_preserving
+        reply.encode_bool(true);   // no_trunc
+        reply.encode_bool(true);   // chown_restricted
+        reply.encode_bool(false);  // case_insensitive: Linux is case-sensitive
+        reply.encode_bool(true);   // case_preserving
     }
 }
 

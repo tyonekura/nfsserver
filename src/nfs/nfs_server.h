@@ -22,6 +22,20 @@ private:
     // Helper: encode wcc_data (simplified: no pre-op attr).
     void encode_wcc_data(XdrEncoder& enc, const FileHandle& fh);
 
+public:
+    // Helper: decode sattr3 fields from XDR.
+    struct Sattr3 {
+        uint32_t mode = UINT32_MAX;
+        uint32_t uid = UINT32_MAX;
+        uint32_t gid = UINT32_MAX;
+        uint64_t size = UINT64_MAX;
+        NfsTimeSet atime;
+        NfsTimeSet mtime;
+    };
+    static Sattr3 decode_sattr3(XdrDecoder& args);
+
+private:
+
     // Procedure implementations.
     void proc_null(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
     void proc_getattr(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
