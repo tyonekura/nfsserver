@@ -1,4 +1,5 @@
 #include "vfs/local_fs.h"
+#include "nfs/nfs_types.h"
 
 #include <cerrno>
 #include <cstring>
@@ -51,6 +52,11 @@ NfsStat3 LocalFs::errno_to_nfsstat() {
         case EROFS:       return NfsStat3::NFS3ERR_ROFS;
         case ENAMETOOLONG: return NfsStat3::NFS3ERR_NAMETOOLONG;
         case ENOTEMPTY:   return NfsStat3::NFS3ERR_NOTEMPTY;
+        case EMLINK:      return NfsStat3::NFS3ERR_MLINK;
+#ifdef EDQUOT
+        case EDQUOT:      return NfsStat3::NFS3ERR_DQUOT;
+#endif
+        case EXDEV:       return NfsStat3::NFS3ERR_XDEV;
         default:          return NfsStat3::NFS3ERR_IO;
     }
 }
@@ -111,7 +117,8 @@ NfsStat3 LocalFs::getattr(const FileHandle& fh, Fattr3& attr) {
 }
 
 NfsStat3 LocalFs::setattr(const FileHandle& fh, uint32_t mode, uint32_t uid,
-                            uint32_t gid, uint64_t size) {
+                            uint32_t gid, uint64_t size,
+                            NfsTimeSet atime, NfsTimeSet mtime) {
     std::string path = resolve_path(fh);
     if (path.empty()) return NfsStat3::NFS3ERR_STALE;
 
@@ -120,10 +127,37 @@ NfsStat3 LocalFs::setattr(const FileHandle& fh, uint32_t mode, uint32_t uid,
     if (uid != UINT32_MAX || gid != UINT32_MAX) {
         uid_t u = (uid != UINT32_MAX) ? uid : static_cast<uid_t>(-1);
         gid_t g = (gid != UINT32_MAX) ? gid : static_cast<gid_t>(-1);
-        if (chown(path.c_str(), u, g) != 0) return errno_to_nfsstat();
+        if (lchown(path.c_str(), u, g) != 0) return errno_to_nfsstat();
     }
     if (size != UINT64_MAX)
         if (truncate(path.c_str(), size) != 0) return errno_to_nfsstat();
+
+    if (atime.how != NfsTimeSet::How::DONT_CHANGE ||
+        mtime.how != NfsTimeSet::How::DONT_CHANGE) {
+        struct timespec times[2];
+        if (atime.how == NfsTimeSet::How::DONT_CHANGE) {
+            times[0].tv_sec = 0;
+            times[0].tv_nsec = UTIME_OMIT;
+        } else if (atime.how == NfsTimeSet::How::SET_TO_SERVER_TIME) {
+            times[0].tv_sec = 0;
+            times[0].tv_nsec = UTIME_NOW;
+        } else {
+            times[0].tv_sec = atime.time.seconds;
+            times[0].tv_nsec = atime.time.nseconds;
+        }
+        if (mtime.how == NfsTimeSet::How::DONT_CHANGE) {
+            times[1].tv_sec = 0;
+            times[1].tv_nsec = UTIME_OMIT;
+        } else if (mtime.how == NfsTimeSet::How::SET_TO_SERVER_TIME) {
+            times[1].tv_sec = 0;
+            times[1].tv_nsec = UTIME_NOW;
+        } else {
+            times[1].tv_sec = mtime.time.seconds;
+            times[1].tv_nsec = mtime.time.nseconds;
+        }
+        if (utimensat(AT_FDCWD, path.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0)
+            return errno_to_nfsstat();
+    }
 
     return NfsStat3::NFS3_OK;
 }
@@ -148,8 +182,28 @@ NfsStat3 LocalFs::access(const FileHandle& fh, uint32_t requested,
                            uint32_t& granted) {
     std::string path = resolve_path(fh);
     if (path.empty()) return NfsStat3::NFS3ERR_STALE;
-    // Simplified: grant all requested access.
-    granted = requested;
+
+    struct stat st;
+    if (lstat(path.c_str(), &st) != 0) return errno_to_nfsstat();
+
+    // Check permission bits. Running as root so check all bits.
+    // TODO: Thread RPC credentials down for proper per-user checks.
+    granted = 0;
+    bool is_dir = S_ISDIR(st.st_mode);
+
+    if ((requested & ACCESS3_READ) && (st.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)))
+        granted |= ACCESS3_READ;
+    if ((requested & ACCESS3_LOOKUP) && is_dir && (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+        granted |= ACCESS3_LOOKUP;
+    if ((requested & ACCESS3_MODIFY) && (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)))
+        granted |= ACCESS3_MODIFY;
+    if ((requested & ACCESS3_EXTEND) && (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)))
+        granted |= ACCESS3_EXTEND;
+    if ((requested & ACCESS3_DELETE) && is_dir && (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)))
+        granted |= ACCESS3_DELETE;
+    if ((requested & ACCESS3_EXECUTE) && !is_dir && (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+        granted |= ACCESS3_EXECUTE;
+
     return NfsStat3::NFS3_OK;
 }
 
@@ -230,7 +284,19 @@ NfsStat3 LocalFs::remove(const FileHandle& dir_fh, const std::string& name) {
     if (dir_path.empty()) return NfsStat3::NFS3ERR_STALE;
 
     std::string full = dir_path + "/" + name;
+
+    // Get handle before removing so we can evict from cache
+    struct stat st;
+    FileHandle victim_fh;
+    bool have_victim = (lstat(full.c_str(), &st) == 0);
+    if (have_victim) victim_fh = make_handle(st.st_ino, st.st_dev);
+
     if (unlink(full.c_str()) != 0) return errno_to_nfsstat();
+
+    if (have_victim) {
+        std::lock_guard<std::mutex> lock(mu_);
+        handle_to_path_.erase(victim_fh);
+    }
     return NfsStat3::NFS3_OK;
 }
 
@@ -239,7 +305,19 @@ NfsStat3 LocalFs::rmdir(const FileHandle& dir_fh, const std::string& name) {
     if (dir_path.empty()) return NfsStat3::NFS3ERR_STALE;
 
     std::string full = dir_path + "/" + name;
+
+    // Get handle before removing so we can evict from cache
+    struct stat st;
+    FileHandle victim_fh;
+    bool have_victim = (lstat(full.c_str(), &st) == 0);
+    if (have_victim) victim_fh = make_handle(st.st_ino, st.st_dev);
+
     if (::rmdir(full.c_str()) != 0) return errno_to_nfsstat();
+
+    if (have_victim) {
+        std::lock_guard<std::mutex> lock(mu_);
+        handle_to_path_.erase(victim_fh);
+    }
     return NfsStat3::NFS3_OK;
 }
 
@@ -251,7 +329,19 @@ NfsStat3 LocalFs::rename(const FileHandle& from_dir, const std::string& from_nam
 
     std::string from = from_dir_path + "/" + from_name;
     std::string to = to_dir_path + "/" + to_name;
+
+    // Capture inode before rename (inode survives rename)
+    struct stat st;
+    bool have_stat = (lstat(from.c_str(), &st) == 0);
+    FileHandle moved_fh;
+    if (have_stat) moved_fh = make_handle(st.st_ino, st.st_dev);
+
     if (::rename(from.c_str(), to.c_str()) != 0) return errno_to_nfsstat();
+
+    if (have_stat) {
+        std::lock_guard<std::mutex> lock(mu_);
+        handle_to_path_[moved_fh] = to;
+    }
     return NfsStat3::NFS3_OK;
 }
 

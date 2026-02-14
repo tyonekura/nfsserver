@@ -80,6 +80,15 @@ struct Fattr3 {
     NfsTime3 ctime;
 };
 
+struct NfsTimeSet {
+    enum class How : uint32_t {
+        DONT_CHANGE = 0,
+        SET_TO_SERVER_TIME = 1,
+        SET_TO_CLIENT_TIME = 2
+    } how = How::DONT_CHANGE;
+    NfsTime3 time;
+};
+
 struct DirEntry {
     uint64_t fileid;
     std::string name;
@@ -93,7 +102,8 @@ public:
 
     virtual NfsStat3 getattr(const FileHandle& fh, Fattr3& attr) = 0;
     virtual NfsStat3 setattr(const FileHandle& fh, uint32_t mode, uint32_t uid,
-                              uint32_t gid, uint64_t size) = 0;
+                              uint32_t gid, uint64_t size,
+                              NfsTimeSet atime, NfsTimeSet mtime) = 0;
     virtual NfsStat3 lookup(const FileHandle& dir_fh, const std::string& name,
                              FileHandle& out_fh, Fattr3& out_attr) = 0;
     virtual NfsStat3 access(const FileHandle& fh, uint32_t requested,

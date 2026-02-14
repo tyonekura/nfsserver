@@ -17,3 +17,7 @@ add_test(NAME test_rpc COMMAND test_rpc)
 add_executable(test_nfs test_nfs.cpp)
 target_link_libraries(test_nfs PRIVATE nfs_lib GTest::gtest_main)
 add_test(NAME test_nfs COMMAND test_nfs)
+
+add_executable(test_vfs test_vfs.cpp)
+target_link_libraries(test_vfs PRIVATE nfs_lib GTest::gtest_main)
+add_test(NAME test_vfs COMMAND test_vfs)

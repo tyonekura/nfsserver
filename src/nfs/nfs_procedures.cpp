@@ -27,16 +27,24 @@ void NfsServer::proc_setattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     if (args.decode_bool()) uid = args.decode_uint32();
     if (args.decode_bool()) gid = args.decode_uint32();
     if (args.decode_bool()) size = args.decode_uint64();
-    // atime set_it
-    uint32_t atime_how = args.decode_uint32();
-    if (atime_how == 2) { args.decode_uint32(); args.decode_uint32(); }
-    // mtime set_it
-    uint32_t mtime_how = args.decode_uint32();
-    if (mtime_how == 2) { args.decode_uint32(); args.decode_uint32(); }
+    // atime
+    NfsTimeSet atime;
+    atime.how = static_cast<NfsTimeSet::How>(args.decode_uint32());
+    if (atime.how == NfsTimeSet::How::SET_TO_CLIENT_TIME) {
+        atime.time.seconds = args.decode_uint32();
+        atime.time.nseconds = args.decode_uint32();
+    }
+    // mtime
+    NfsTimeSet mtime;
+    mtime.how = static_cast<NfsTimeSet::How>(args.decode_uint32());
+    if (mtime.how == NfsTimeSet::How::SET_TO_CLIENT_TIME) {
+        mtime.time.seconds = args.decode_uint32();
+        mtime.time.nseconds = args.decode_uint32();
+    }
     // guard (sattrguard3)
     if (args.decode_bool()) { args.decode_uint32(); args.decode_uint32(); }
 
-    NfsStat3 status = vfs_.setattr(fh, mode, uid, gid, size);
+    NfsStat3 status = vfs_.setattr(fh, mode, uid, gid, size, atime, mtime);
     reply.encode_uint32(static_cast<uint32_t>(status));
     encode_wcc_data(reply, fh);
 }

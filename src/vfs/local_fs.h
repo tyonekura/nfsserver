@@ -13,7 +13,8 @@ public:
 
     NfsStat3 getattr(const FileHandle& fh, Fattr3& attr) override;
     NfsStat3 setattr(const FileHandle& fh, uint32_t mode, uint32_t uid,
-                      uint32_t gid, uint64_t size) override;
+                      uint32_t gid, uint64_t size,
+                      NfsTimeSet atime, NfsTimeSet mtime) override;
     NfsStat3 lookup(const FileHandle& dir_fh, const std::string& name,
                      FileHandle& out_fh, Fattr3& out_attr) override;
     NfsStat3 access(const FileHandle& fh, uint32_t requested,
