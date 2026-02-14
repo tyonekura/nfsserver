@@ -5,14 +5,15 @@
 #include "vfs/local_fs.h"
 
 #include <csignal>
+#include <ctime>
 #include <iostream>
 #include <string>
 #include <vector>
 
-static RpcServer* g_server = nullptr;
+static volatile sig_atomic_t g_shutdown = 0;
 
 static void signal_handler(int) {
-    if (g_server) g_server->stop();
+    g_shutdown = 1;
 }
 
 static void print_usage(const char* prog) {
@@ -30,7 +31,12 @@ int main(int argc, char* argv[]) {
         if (arg == "--export" && i + 1 < argc) {
             export_path = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
-            port = static_cast<uint16_t>(std::stoi(argv[++i]));
+            int p = std::stoi(argv[++i]);
+            if (p < 1 || p > 65535) {
+                std::cerr << "Error: port must be 1-65535\n";
+                return 1;
+            }
+            port = static_cast<uint16_t>(p);
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -52,13 +58,12 @@ int main(int argc, char* argv[]) {
 
     try {
         LocalFs vfs(export_path);
-        std::vector<std::string> exports = {"/"};
+        std::vector<std::string> exports = {export_path};
 
         MountServer mount_srv(vfs, exports);
         NfsServer nfs_srv(vfs);
 
         RpcServer rpc;
-        g_server = &rpc;
 
         rpc.register_program(MOUNT_PROGRAM, MOUNT_V3, mount_srv.get_handlers());
         rpc.register_program(NFS_PROGRAM, NFS_V3, nfs_srv.get_handlers());
@@ -69,8 +74,13 @@ int main(int argc, char* argv[]) {
 
         rpc.start(port);
 
-        // Wait for signal.
-        pause();
+        // Wait for shutdown signal (async-signal-safe polling)
+        while (!g_shutdown) {
+            struct timespec ts = {0, 100000000}; // 100ms
+            nanosleep(&ts, nullptr);
+        }
+
+        rpc.stop();
 
     } catch (const std::exception& e) {
         std::cerr << "Fatal: " << e.what() << "\n";

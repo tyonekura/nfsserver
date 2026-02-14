@@ -10,6 +10,7 @@ RpcProgramHandlers MountServer::get_handlers() {
     h.procedures[MOUNTPROC3_MNT] = [this](auto& c, auto& a, auto& r) { proc_mnt(c, a, r); };
     h.procedures[MOUNTPROC3_DUMP] = [this](auto& c, auto& a, auto& r) { proc_dump(c, a, r); };
     h.procedures[MOUNTPROC3_UMNT] = [this](auto& c, auto& a, auto& r) { proc_umnt(c, a, r); };
+    h.procedures[MOUNTPROC3_UMNTALL] = [this](auto& c, auto& a, auto& r) { proc_umntall(c, a, r); };
     h.procedures[MOUNTPROC3_EXPORT] = [this](auto& c, auto& a, auto& r) { proc_export(c, a, r); };
     return h;
 }
@@ -21,10 +22,10 @@ void MountServer::proc_null(const RpcCallHeader&, XdrDecoder&, XdrEncoder&) {
 void MountServer::proc_mnt(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     std::string dirpath = args.decode_string();
 
-    // Check if the path is in our export list.
+    // Check if the path is in our export list, also accept "/" as alias
     bool found = false;
     for (const auto& exp : exports_) {
-        if (dirpath == exp) { found = true; break; }
+        if (dirpath == exp || dirpath == "/") { found = true; break; }
     }
 
     if (!found) {
@@ -33,7 +34,7 @@ void MountServer::proc_mnt(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     }
 
     FileHandle fh;
-    NfsStat3 stat = vfs_.get_root_fh(dirpath, fh);
+    NfsStat3 stat = vfs_.get_root_fh("/", fh);
     if (stat != NfsStat3::NFS3_OK) {
         reply.encode_uint32(static_cast<uint32_t>(MountStat3::MNT3ERR_NOENT));
         return;
@@ -55,6 +56,10 @@ void MountServer::proc_dump(const RpcCallHeader&, XdrDecoder&, XdrEncoder& reply
 void MountServer::proc_umnt(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&) {
     // Just consume the dirpath argument; we don't track mount state.
     args.decode_string();
+}
+
+void MountServer::proc_umntall(const RpcCallHeader&, XdrDecoder&, XdrEncoder&) {
+    // No-op: we don't track per-client mount state.
 }
 
 void MountServer::proc_export(const RpcCallHeader&, XdrDecoder&, XdrEncoder& reply) {

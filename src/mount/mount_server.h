@@ -17,6 +17,7 @@ private:
     void proc_mnt(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
     void proc_dump(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
     void proc_umnt(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
+    void proc_umntall(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
     void proc_export(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);
 
     Vfs& vfs_;
