@@ -101,6 +101,52 @@ TEST(XdrCodec, FourByteAlignment) {
     EXPECT_EQ(enc.size() % 4, 0u);
 }
 
+TEST(XdrCodec, Int64RoundTrip) {
+    XdrEncoder enc;
+    enc.encode_int64(-1LL);
+    enc.encode_int64(0LL);
+    enc.encode_int64(INT64_MAX);
+    enc.encode_int64(INT64_MIN);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    EXPECT_EQ(dec.decode_int64(), -1LL);
+    EXPECT_EQ(dec.decode_int64(), 0LL);
+    EXPECT_EQ(dec.decode_int64(), INT64_MAX);
+    EXPECT_EQ(dec.decode_int64(), INT64_MIN);
+}
+
+TEST(XdrCodec, SkipBytes) {
+    XdrEncoder enc;
+    enc.encode_uint32(0xDEADBEEF);
+    enc.encode_uint32(0xCAFEBABE);
+    enc.encode_uint32(0x12345678);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    dec.skip(4); // skip first uint32
+    EXPECT_EQ(dec.decode_uint32(), 0xCAFEBABEu);
+    EXPECT_EQ(dec.remaining(), 4u);
+}
+
+TEST(XdrCodec, SkipWithPadding) {
+    // Encode 3 bytes of fixed opaque (padded to 4), then a uint32
+    XdrEncoder enc;
+    enc.encode_opaque_fixed("abc", 3);
+    enc.encode_uint32(42);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    dec.skip(3); // should advance past padding to next 4-byte boundary
+    EXPECT_EQ(dec.decode_uint32(), 42u);
+}
+
+TEST(XdrCodec, EmptyOpaqueRoundTrip) {
+    XdrEncoder enc;
+    enc.encode_opaque(nullptr, 0);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    auto result = dec.decode_opaque();
+    EXPECT_TRUE(result.empty());
+}
+
 TEST(XdrCodec, BufferUnderflow) {
     XdrEncoder enc;
     enc.encode_uint32(42);
