@@ -10,24 +10,25 @@ Standalone NFSv3 server implemented from scratch in C++17 for Linux. Does not us
 - **RFC 5531** — ONC RPC v2
 - **RFC 4506** — XDR (External Data Representation)
 
-## Build Commands
+## Build & Test
+
+All builds and tests **must** run inside Docker (Linux). The codebase uses Linux-only APIs (`MSG_NOSIGNAL`) and will not compile on macOS.
 
 ```bash
-# Configure
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-
-# Build
-cmake --build build
-
-# Run all tests
-ctest --test-dir build --output-on-failure
+# Build image and run all tests
+docker build -t nfsd-test . && docker run --rm nfsd-test
 
 # Run a single test
-./build/tests/test_xdr --gtest_filter="XdrCodec.Uint32RoundTrip"
+docker run --rm nfsd-test ./build/tests/test_xdr --gtest_filter="XdrCodec.Uint32RoundTrip"
 
-# Run server
-sudo ./build/nfsd --export /path/to/share --port 2049
+# Open a shell in the container for debugging
+docker run --rm -it nfsd-test bash
+
+# Run server (requires --privileged for NFS port)
+docker run --rm -it --privileged -v /path/to/share:/export nfsd-test ./build/nfsd --export /export --port 2049
 ```
+
+The `Dockerfile` uses Ubuntu 22.04, installs build-essential/cmake/git, builds the project, and defaults to running `ctest`.
 
 ## Architecture
 
@@ -65,3 +66,7 @@ Unit tests use GoogleTest (fetched via CMake FetchContent). Test files:
 - `tests/test_nfs.cpp` — File handle comparison, NFS constants
 
 Integration testing: mount from a Linux client with `mount -t nfs -o vers=3,proto=tcp <host>:/ /mnt/test`.
+
+## Workflow
+
+- **Always commit after each task.** When a task is completed, stage and commit the changes before moving on.
