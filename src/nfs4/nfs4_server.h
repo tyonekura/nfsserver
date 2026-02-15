@@ -37,9 +37,11 @@ private:
     // RFC 7530 §16 - Individual operation handlers
     Nfs4Stat op_access(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_close(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_commit(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_create(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_getattr(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_getfh(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_link(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_lookup(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_lookupp(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
@@ -48,6 +50,7 @@ private:
     Nfs4Stat op_putrootfh(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_read(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_readdir(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_readlink(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_remove(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_rename(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_renew(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);

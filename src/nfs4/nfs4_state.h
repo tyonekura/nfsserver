@@ -5,8 +5,10 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <atomic>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 // RFC 7530 §3.2 - NFSv4 client and open state management
@@ -34,6 +36,7 @@ struct Nfs4OpenState {
 class Nfs4StateManager {
 public:
     Nfs4StateManager();
+    ~Nfs4StateManager();
 
     // RFC 7530 §16.33 - SETCLIENTID
     // Returns {clientid, confirm_verifier}
@@ -78,10 +81,17 @@ private:
     // Generate a unique stateid.other
     void gen_stateid_other(uint8_t out[12]);
 
+    // RFC 7530 §9.6 - Lease expiry: remove expired clients and their open state
+    void expire_clients();
+    void reaper_loop();
+
     std::mutex mu_;
     uint64_t next_clientid_ = 1;
     uint64_t next_state_counter_ = 1;
     std::map<uint64_t, Nfs4Client> clients_;                       // clientid -> client
     std::map<std::vector<uint8_t>, uint64_t> client_id_to_clientid_; // nfs_client_id4 -> clientid
     std::vector<Nfs4OpenState> open_states_;
+
+    std::atomic<bool> reaper_running_{true};
+    std::thread reaper_thread_;
 };

@@ -2,10 +2,58 @@
 #include <algorithm>
 #include <cstring>
 #include <random>
+#include <thread>
 
 // RFC 7530 - NFSv4 state management
 
-Nfs4StateManager::Nfs4StateManager() = default;
+Nfs4StateManager::Nfs4StateManager() {
+    reaper_thread_ = std::thread(&Nfs4StateManager::reaper_loop, this);
+}
+
+Nfs4StateManager::~Nfs4StateManager() {
+    reaper_running_ = false;
+    if (reaper_thread_.joinable())
+        reaper_thread_.join();
+}
+
+// RFC 7530 §9.6 - Lease expiry reaper thread
+void Nfs4StateManager::reaper_loop() {
+    while (reaper_running_) {
+        // Sleep in 1-second increments to allow quick shutdown
+        for (int i = 0; i < 30 && reaper_running_; i++)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!reaper_running_) break;
+        expire_clients();
+    }
+}
+
+void Nfs4StateManager::expire_clients() {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto now = std::chrono::steady_clock::now();
+    auto lease = std::chrono::seconds(NFS4_LEASE_TIME);
+
+    std::vector<uint64_t> expired;
+    for (auto& [cid, client] : clients_) {
+        if (client.confirmed && (now - client.last_renewed) > lease) {
+            expired.push_back(cid);
+        }
+    }
+
+    for (uint64_t cid : expired) {
+        // Remove all open state for this client
+        open_states_.erase(
+            std::remove_if(open_states_.begin(), open_states_.end(),
+                [cid](const Nfs4OpenState& os) { return os.clientid == cid; }),
+            open_states_.end());
+
+        // Remove client_id mapping
+        auto& client = clients_[cid];
+        client_id_to_clientid_.erase(client.client_id);
+
+        // Remove client
+        clients_.erase(cid);
+    }
+}
 
 void Nfs4StateManager::gen_stateid_other(uint8_t out[12]) {
     std::memset(out, 0, 12);
@@ -121,6 +169,9 @@ Nfs4Stat Nfs4StateManager::open_file(uint64_t clientid,
     // Check if there's an existing open for same owner+fh
     for (auto& os : open_states_) {
         if (os.clientid == clientid && os.owner == owner && os.fh == fh) {
+            // RFC 7530 §8.1.5 - Sequence ID validation
+            if (seqid != os.open_seqid + 1)
+                return Nfs4Stat::NFS4ERR_BAD_SEQID;
             // Upgrade access if needed
             os.access |= access;
             os.stateid.seqid++;
@@ -161,6 +212,10 @@ Nfs4Stat Nfs4StateManager::confirm_open(const Nfs4StateId& stateid,
     auto* os = find_open_state(stateid);
     if (!os) return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
+    // RFC 7530 §8.1.5 - Sequence ID validation
+    if (seqid != os->open_seqid + 1)
+        return Nfs4Stat::NFS4ERR_BAD_SEQID;
+
     os->confirmed = true;
     os->stateid.seqid++;
     os->open_seqid = seqid;
@@ -176,7 +231,7 @@ Nfs4Stat Nfs4StateManager::confirm_open(const Nfs4StateId& stateid,
 
 // RFC 7530 §16.4 - CLOSE
 Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
-                                        uint32_t /*seqid*/,
+                                        uint32_t seqid,
                                         Nfs4StateId& out_stateid) {
     std::lock_guard<std::mutex> lk(mu_);
 
@@ -187,6 +242,10 @@ Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
 
     if (it == open_states_.end())
         return Nfs4Stat::NFS4ERR_BAD_STATEID;
+
+    // RFC 7530 §8.1.5 - Sequence ID validation
+    if (seqid != it->open_seqid + 1)
+        return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
     // Return a final stateid with seqid=UINT32_MAX to indicate closed
     out_stateid = it->stateid;

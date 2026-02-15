@@ -13,7 +13,8 @@ private:
     FileHandle decode_fh(XdrDecoder& dec);                          // RFC 1813 §2.3.3 - nfs_fh3
     void encode_fattr3(XdrEncoder& enc, const Fattr3& attr);        // RFC 1813 §2.5 - fattr3
     void encode_post_op_attr(XdrEncoder& enc, const FileHandle& fh); // RFC 1813 §2.6 - post_op_attr
-    void encode_wcc_data(XdrEncoder& enc, const FileHandle& fh);     // RFC 1813 §2.6 - wcc_data
+    void encode_wcc_data(XdrEncoder& enc, const FileHandle& fh,
+                          const Fattr3* pre = nullptr);              // RFC 1813 §2.6 - wcc_data
 
 public:
     // RFC 1813 §2.5 - sattr3 (settable file attributes)

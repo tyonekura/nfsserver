@@ -207,6 +207,42 @@ TEST(Nfs4State, Renew) {
     EXPECT_EQ(mgr.renew(clientid), Nfs4Stat::NFS4_OK);
 }
 
+TEST(Nfs4State, BadSeqid) {
+    Nfs4StateManager mgr;
+
+    // Setup client
+    uint8_t verifier[8] = {1};
+    std::vector<uint8_t> cid = {1};
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid);
+    mgr.confirm_clientid(clientid, confirm.data());
+
+    // Open
+    FileHandle fh;
+    fh.len = 16;
+    fh.data[0] = 42;
+    std::vector<uint8_t> owner = {1, 2, 3};
+    Nfs4StateId stateid;
+    bool needs_confirm = false;
+
+    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_READ,
+                             OPEN4_SHARE_DENY_NONE, stateid, needs_confirm),
+              Nfs4Stat::NFS4_OK);
+
+    // Confirm with wrong seqid (should be 2, using 5)
+    Nfs4StateId confirmed_sid;
+    EXPECT_EQ(mgr.confirm_open(stateid, 5, confirmed_sid), Nfs4Stat::NFS4ERR_BAD_SEQID);
+
+    // Confirm with correct seqid
+    EXPECT_EQ(mgr.confirm_open(stateid, 2, confirmed_sid), Nfs4Stat::NFS4_OK);
+
+    // Close with wrong seqid (should be 3, using 1)
+    Nfs4StateId closed_sid;
+    EXPECT_EQ(mgr.close_file(confirmed_sid, 1, closed_sid), Nfs4Stat::NFS4ERR_BAD_SEQID);
+
+    // Close with correct seqid
+    EXPECT_EQ(mgr.close_file(confirmed_sid, 3, closed_sid), Nfs4Stat::NFS4_OK);
+}
+
 // --- COMPOUND dispatch tests ---
 
 TEST(Nfs4Compound, MinorVersionMismatch) {

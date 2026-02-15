@@ -84,8 +84,18 @@ void NfsServer::encode_post_op_attr(XdrEncoder& enc, const FileHandle& fh) {
 }
 
 // RFC 1813 §2.6 - wcc_data (weak cache consistency: pre_op_attr + post_op_attr)
-void NfsServer::encode_wcc_data(XdrEncoder& enc, const FileHandle& fh) {
-    // Simplified: no pre-op attributes
-    enc.encode_bool(false);  // pre_op_attr: false
+void NfsServer::encode_wcc_data(XdrEncoder& enc, const FileHandle& fh,
+                                 const Fattr3* pre) {
+    if (pre) {
+        // pre_op_attr: wcc_attr (size, mtime, ctime)
+        enc.encode_bool(true);
+        enc.encode_uint64(pre->size);
+        enc.encode_uint32(pre->mtime.seconds);
+        enc.encode_uint32(pre->mtime.nseconds);
+        enc.encode_uint32(pre->ctime.seconds);
+        enc.encode_uint32(pre->ctime.nseconds);
+    } else {
+        enc.encode_bool(false);
+    }
     encode_post_op_attr(enc, fh);
 }

@@ -51,19 +51,21 @@ void NfsServer::proc_setattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
         guard_nsec = args.decode_uint32();
     }
 
+    // Capture pre-op attributes for WCC
+    Fattr3 pre;
+    bool have_pre = (vfs_.getattr(fh, pre) == NfsStat3::NFS3_OK);
+
     // Check guard before applying changes
     if (check_guard) {
-        Fattr3 current;
-        NfsStat3 s = vfs_.getattr(fh, current);
-        if (s != NfsStat3::NFS3_OK) {
-            reply.encode_uint32(static_cast<uint32_t>(s));
+        if (!have_pre) {
+            reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_STALE));
             encode_wcc_data(reply, fh);
             return;
         }
-        if (current.ctime.seconds != guard_sec ||
-            current.ctime.nseconds != guard_nsec) {
+        if (pre.ctime.seconds != guard_sec ||
+            pre.ctime.nseconds != guard_nsec) {
             reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_NOT_SYNC));
-            encode_wcc_data(reply, fh);
+            encode_wcc_data(reply, fh, &pre);
             return;
         }
     }
@@ -71,7 +73,7 @@ void NfsServer::proc_setattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     NfsStat3 status = vfs_.setattr(fh, sa.mode, sa.uid, sa.gid, sa.size,
                                     sa.atime, sa.mtime);
     reply.encode_uint32(static_cast<uint32_t>(status));
-    encode_wcc_data(reply, fh);
+    encode_wcc_data(reply, fh, have_pre ? &pre : nullptr);
 }
 
 // RFC 1813 §3.3.3 Procedure 3: LOOKUP - Lookup filename
@@ -145,17 +147,20 @@ void NfsServer::proc_write(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     uint32_t stable = args.decode_uint32();
     auto data = args.decode_opaque();
 
+    Fattr3 pre;
+    bool have_pre = (vfs_.getattr(fh, pre) == NfsStat3::NFS3_OK);
+
     // Validate count against data length
     if (data.size() < count) {
         reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_INVAL));
-        encode_wcc_data(reply, fh);
+        encode_wcc_data(reply, fh, have_pre ? &pre : nullptr);
         return;
     }
 
     uint32_t written = 0;
     NfsStat3 status = vfs_.write(fh, offset, data.data(), count, written);
     reply.encode_uint32(static_cast<uint32_t>(status));
-    encode_wcc_data(reply, fh);
+    encode_wcc_data(reply, fh, have_pre ? &pre : nullptr);
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_uint32(written);
         reply.encode_uint32(stable); // echo back requested stability
@@ -178,6 +183,9 @@ void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
         args.decode_uint64();
     }
 
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
+
     // For GUARDED mode, check if file already exists
     if (createmode == GUARDED) {
         FileHandle existing_fh;
@@ -185,7 +193,7 @@ void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
         NfsStat3 lookup_stat = vfs_.lookup(dir_fh, name, existing_fh, existing_attr);
         if (lookup_stat == NfsStat3::NFS3_OK) {
             reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_EXIST));
-            encode_wcc_data(reply, dir_fh);
+            encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
             return;
         }
     }
@@ -195,14 +203,12 @@ void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     NfsStat3 status = vfs_.create(dir_fh, name, mode, out_fh, out_attr);
     reply.encode_uint32(static_cast<uint32_t>(status));
     if (status == NfsStat3::NFS3_OK) {
-        // post_op_fh3: true + handle
         reply.encode_bool(true);
         reply.encode_opaque(out_fh.data, out_fh.len);
-        // post_op_attr
         reply.encode_bool(true);
         encode_fattr3(reply, out_attr);
     }
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.9 Procedure 9: MKDIR - Create a directory
@@ -212,6 +218,9 @@ void NfsServer::proc_mkdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
 
     Sattr3 sa = decode_sattr3(args);
     uint32_t mode = (sa.mode != UINT32_MAX) ? sa.mode : 0755u;
+
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
 
     FileHandle out_fh;
     Fattr3 out_attr;
@@ -223,7 +232,7 @@ void NfsServer::proc_mkdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
         reply.encode_bool(true);
         encode_fattr3(reply, out_attr);
     }
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.10 Procedure 10: SYMLINK - Create a symbolic link
@@ -232,6 +241,9 @@ void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     std::string name = args.decode_string();
     decode_sattr3(args); // sattr3 for symlink (not applied)
     std::string target = args.decode_string();
+
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
 
     FileHandle out_fh;
     Fattr3 out_attr;
@@ -243,7 +255,7 @@ void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
         reply.encode_bool(true);
         encode_fattr3(reply, out_attr);
     }
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.11 Procedure 11: MKNOD - Create a special device
@@ -263,26 +275,37 @@ void NfsServer::proc_mknod(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
         decode_sattr3(args);
     }
 
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
+
     reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_NOTSUPP));
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.12 Procedure 12: REMOVE - Remove a file
 void NfsServer::proc_remove(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
+
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
+
     NfsStat3 status = vfs_.remove(dir_fh, name);
     reply.encode_uint32(static_cast<uint32_t>(status));
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.13 Procedure 13: RMDIR - Remove a directory
 void NfsServer::proc_rmdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
+
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
+
     NfsStat3 status = vfs_.rmdir(dir_fh, name);
     reply.encode_uint32(static_cast<uint32_t>(status));
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.14 Procedure 14: RENAME - Rename a file or directory
@@ -292,10 +315,14 @@ void NfsServer::proc_rename(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     FileHandle to_dir = decode_fh(args);
     std::string to_name = args.decode_string();
 
+    Fattr3 from_pre, to_pre;
+    bool have_from_pre = (vfs_.getattr(from_dir, from_pre) == NfsStat3::NFS3_OK);
+    bool have_to_pre = (vfs_.getattr(to_dir, to_pre) == NfsStat3::NFS3_OK);
+
     NfsStat3 status = vfs_.rename(from_dir, from_name, to_dir, to_name);
     reply.encode_uint32(static_cast<uint32_t>(status));
-    encode_wcc_data(reply, from_dir);
-    encode_wcc_data(reply, to_dir);
+    encode_wcc_data(reply, from_dir, have_from_pre ? &from_pre : nullptr);
+    encode_wcc_data(reply, to_dir, have_to_pre ? &to_pre : nullptr);
 }
 
 // RFC 1813 §3.3.15 Procedure 15: LINK - Create link to an object
@@ -304,18 +331,36 @@ void NfsServer::proc_link(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& re
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
 
+    Fattr3 dir_pre;
+    bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
+
     NfsStat3 status = vfs_.link(fh, dir_fh, name);
     reply.encode_uint32(static_cast<uint32_t>(status));
     encode_post_op_attr(reply, fh);
-    encode_wcc_data(reply, dir_fh);
+    encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 
 // RFC 1813 §3.3.16 Procedure 16: READDIR - Read from directory
 void NfsServer::proc_readdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     uint64_t cookie = args.decode_uint64();
-    args.decode_uint64(); // cookieverf (ignored for simplicity)
+    uint64_t client_verf = args.decode_uint64();
     uint32_t dircount = args.decode_uint32();
+
+    // Generate cookieverf from directory mtime
+    Fattr3 dir_attr;
+    uint64_t verf = 0;
+    if (vfs_.getattr(dir_fh, dir_attr) == NfsStat3::NFS3_OK) {
+        verf = (static_cast<uint64_t>(dir_attr.mtime.seconds) << 32) |
+               dir_attr.mtime.nseconds;
+    }
+
+    // Validate cookieverf on non-initial requests
+    if (cookie != 0 && client_verf != 0 && client_verf != verf) {
+        reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_BAD_COOKIE));
+        encode_post_op_attr(reply, dir_fh);
+        return;
+    }
 
     std::vector<DirEntry> entries;
     bool eof = false;
@@ -323,7 +368,7 @@ void NfsServer::proc_readdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     reply.encode_uint32(static_cast<uint32_t>(status));
     encode_post_op_attr(reply, dir_fh);
     if (status == NfsStat3::NFS3_OK) {
-        reply.encode_uint64(0); // cookieverf
+        reply.encode_uint64(verf);
         for (const auto& e : entries) {
             reply.encode_bool(true); // value follows
             reply.encode_uint64(e.fileid);
@@ -339,9 +384,23 @@ void NfsServer::proc_readdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
 void NfsServer::proc_readdirplus(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     uint64_t cookie = args.decode_uint64();
-    args.decode_uint64(); // cookieverf
+    uint64_t client_verf = args.decode_uint64();
     uint32_t dircount = args.decode_uint32();
-    args.decode_uint32(); // maxcount (unused in simplified implementation)
+    args.decode_uint32(); // maxcount
+
+    // Generate cookieverf from directory mtime
+    Fattr3 dir_attr;
+    uint64_t verf = 0;
+    if (vfs_.getattr(dir_fh, dir_attr) == NfsStat3::NFS3_OK) {
+        verf = (static_cast<uint64_t>(dir_attr.mtime.seconds) << 32) |
+               dir_attr.mtime.nseconds;
+    }
+
+    if (cookie != 0 && client_verf != 0 && client_verf != verf) {
+        reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_BAD_COOKIE));
+        encode_post_op_attr(reply, dir_fh);
+        return;
+    }
 
     std::vector<DirEntry> entries;
     bool eof = false;
@@ -349,16 +408,25 @@ void NfsServer::proc_readdirplus(const RpcCallHeader&, XdrDecoder& args, XdrEnco
     reply.encode_uint32(static_cast<uint32_t>(status));
     encode_post_op_attr(reply, dir_fh);
     if (status == NfsStat3::NFS3_OK) {
-        reply.encode_uint64(0); // cookieverf
+        reply.encode_uint64(verf);
         for (const auto& e : entries) {
             reply.encode_bool(true); // value follows
             reply.encode_uint64(e.fileid);
             reply.encode_string(e.name);
             reply.encode_uint64(e.cookie);
-            // name_attributes (post_op_attr): simplified, no attributes
-            reply.encode_bool(false);
-            // name_handle (post_op_fh3): false
-            reply.encode_bool(false);
+
+            // Per-entry post_op_attr and post_op_fh3
+            FileHandle entry_fh;
+            Fattr3 entry_attr;
+            if (vfs_.lookup(dir_fh, e.name, entry_fh, entry_attr) == NfsStat3::NFS3_OK) {
+                reply.encode_bool(true);
+                encode_fattr3(reply, entry_attr);
+                reply.encode_bool(true);
+                reply.encode_opaque(entry_fh.data, entry_fh.len);
+            } else {
+                reply.encode_bool(false);
+                reply.encode_bool(false);
+            }
         }
         reply.encode_bool(false); // no more entries
         reply.encode_bool(eof);
@@ -434,9 +502,12 @@ void NfsServer::proc_commit(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     uint64_t offset = args.decode_uint64();
     uint32_t count = args.decode_uint32();
 
+    Fattr3 pre;
+    bool have_pre = (vfs_.getattr(fh, pre) == NfsStat3::NFS3_OK);
+
     NfsStat3 status = vfs_.commit(fh, offset, count);
     reply.encode_uint32(static_cast<uint32_t>(status));
-    encode_wcc_data(reply, fh);
+    encode_wcc_data(reply, fh, have_pre ? &pre : nullptr);
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_uint64(write_verifier_);
     }

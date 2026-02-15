@@ -18,9 +18,11 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     // Register operation handlers
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_ACCESS)]              = &Nfs4Server::op_access;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_CLOSE)]               = &Nfs4Server::op_close;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_COMMIT)]              = &Nfs4Server::op_commit;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_CREATE)]              = &Nfs4Server::op_create;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_GETATTR)]             = &Nfs4Server::op_getattr;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_GETFH)]               = &Nfs4Server::op_getfh;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LINK)]                = &Nfs4Server::op_link;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOOKUP)]              = &Nfs4Server::op_lookup;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOOKUPP)]             = &Nfs4Server::op_lookupp;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_OPEN)]                = &Nfs4Server::op_open;
@@ -29,6 +31,7 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_PUTROOTFH)]           = &Nfs4Server::op_putrootfh;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_READ)]                = &Nfs4Server::op_read;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_READDIR)]             = &Nfs4Server::op_readdir;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_READLINK)]            = &Nfs4Server::op_readlink;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_REMOVE)]              = &Nfs4Server::op_remove;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RENAME)]              = &Nfs4Server::op_rename;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RENEW)]               = &Nfs4Server::op_renew;
@@ -241,10 +244,22 @@ Nfs4Stat Nfs4Server::op_readdir(CompoundState& cs, XdrDecoder& args, XdrEncoder&
     if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
 
     uint64_t cookie = args.decode_uint64();
-    args.decode_uint64(); // cookieverf (ignored)
+    uint64_t client_verf = args.decode_uint64();
     uint32_t dircount = args.decode_uint32();
-    args.decode_uint32(); // maxcount (ignored for simplicity)
+    args.decode_uint32(); // maxcount
     auto attr_request = decode_bitmap(args);
+
+    // Generate cookieverf from directory mtime
+    Fattr3 dir_attr;
+    uint64_t verf = 0;
+    if (vfs_.getattr(cs.current_fh, dir_attr) == NfsStat3::NFS3_OK) {
+        verf = (static_cast<uint64_t>(dir_attr.mtime.seconds) << 32) |
+               dir_attr.mtime.nseconds;
+    }
+
+    // Validate cookieverf on non-initial requests
+    if (cookie != 0 && client_verf != 0 && client_verf != verf)
+        return Nfs4Stat::NFS4ERR_BAD_COOKIE;
 
     std::vector<DirEntry> entries;
     bool eof = false;
@@ -252,7 +267,7 @@ Nfs4Stat Nfs4Server::op_readdir(CompoundState& cs, XdrDecoder& args, XdrEncoder&
     if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
 
     // cookieverf
-    enc.encode_uint64(0);
+    enc.encode_uint64(verf);
 
     // Entries
     for (const auto& e : entries) {
@@ -276,6 +291,49 @@ Nfs4Stat Nfs4Server::op_readdir(CompoundState& cs, XdrDecoder& args, XdrEncoder&
     enc.encode_bool(false); // no more entries
     enc.encode_bool(eof);
 
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.12 - LINK
+Nfs4Stat Nfs4Server::op_link(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    // saved_fh = source file, current_fh = target directory
+    if (!cs.saved_fh_set || !cs.current_fh_set)
+        return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    std::string newname = args.decode_string();
+
+    // Get before change info for target directory
+    Fattr3 before_attr;
+    vfs_.getattr(cs.current_fh, before_attr);
+    uint64_t change_before = (static_cast<uint64_t>(before_attr.mtime.seconds) << 32) |
+                              before_attr.mtime.nseconds;
+
+    NfsStat3 s = vfs_.link(cs.saved_fh, cs.current_fh, newname);
+    if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
+
+    // Get after change info
+    Fattr3 after_attr;
+    vfs_.getattr(cs.current_fh, after_attr);
+    uint64_t change_after = (static_cast<uint64_t>(after_attr.mtime.seconds) << 32) |
+                             after_attr.mtime.nseconds;
+
+    // change_info4
+    enc.encode_bool(false);
+    enc.encode_uint64(change_before);
+    enc.encode_uint64(change_after);
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.24 - READLINK
+Nfs4Stat Nfs4Server::op_readlink(CompoundState& cs, XdrDecoder&, XdrEncoder& enc) {
+    if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    std::string target;
+    NfsStat3 s = vfs_.readlink(cs.current_fh, target);
+    if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
+
+    enc.encode_string(target);
     return Nfs4Stat::NFS4_OK;
 }
 
@@ -503,6 +561,20 @@ Nfs4Stat Nfs4Server::op_write(CompoundState& cs, XdrDecoder& args, XdrEncoder& e
 
     enc.encode_uint32(written);
     enc.encode_uint32(stable); // echo back committed level
+    enc.encode_uint64(write_verifier_);
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.5 - COMMIT
+Nfs4Stat Nfs4Server::op_commit(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    uint64_t offset = args.decode_uint64();
+    uint32_t count = args.decode_uint32();
+
+    NfsStat3 s = vfs_.commit(cs.current_fh, offset, count);
+    if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
+
     enc.encode_uint64(write_verifier_);
     return Nfs4Stat::NFS4_OK;
 }
