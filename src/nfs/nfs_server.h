@@ -10,20 +10,13 @@ public:
     RpcProgramHandlers get_handlers();
 
 private:
-    // Helper: decode a file handle from XDR (variable-length opaque).
-    FileHandle decode_fh(XdrDecoder& dec);
-
-    // Helper: encode fattr3 into XDR.
-    void encode_fattr3(XdrEncoder& enc, const Fattr3& attr);
-
-    // Helper: encode post_op_attr (true + fattr3 or false).
-    void encode_post_op_attr(XdrEncoder& enc, const FileHandle& fh);
-
-    // Helper: encode wcc_data (simplified: no pre-op attr).
-    void encode_wcc_data(XdrEncoder& enc, const FileHandle& fh);
+    FileHandle decode_fh(XdrDecoder& dec);                          // RFC 1813 §2.3.3 - nfs_fh3
+    void encode_fattr3(XdrEncoder& enc, const Fattr3& attr);        // RFC 1813 §2.5 - fattr3
+    void encode_post_op_attr(XdrEncoder& enc, const FileHandle& fh); // RFC 1813 §2.6 - post_op_attr
+    void encode_wcc_data(XdrEncoder& enc, const FileHandle& fh);     // RFC 1813 §2.6 - wcc_data
 
 public:
-    // Helper: decode sattr3 fields from XDR.
+    // RFC 1813 §2.5 - sattr3 (settable file attributes)
     struct Sattr3 {
         uint32_t mode = UINT32_MAX;
         uint32_t uid = UINT32_MAX;

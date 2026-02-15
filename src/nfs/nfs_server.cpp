@@ -41,6 +41,7 @@ RpcProgramHandlers NfsServer::get_handlers() {
     return h;
 }
 
+// RFC 1813 §2.3.3 - Decode nfs_fh3 (variable-length opaque file handle)
 FileHandle NfsServer::decode_fh(XdrDecoder& dec) {
     auto opaque = dec.decode_opaque();
     FileHandle fh;
@@ -49,6 +50,7 @@ FileHandle NfsServer::decode_fh(XdrDecoder& dec) {
     return fh;
 }
 
+// RFC 1813 §2.5 - Encode fattr3 (file attributes)
 void NfsServer::encode_fattr3(XdrEncoder& enc, const Fattr3& attr) {
     enc.encode_uint32(static_cast<uint32_t>(attr.type));
     enc.encode_uint32(attr.mode);
@@ -70,6 +72,7 @@ void NfsServer::encode_fattr3(XdrEncoder& enc, const Fattr3& attr) {
     enc.encode_uint32(attr.ctime.nseconds);
 }
 
+// RFC 1813 §2.6 - post_op_attr (optional fattr3)
 void NfsServer::encode_post_op_attr(XdrEncoder& enc, const FileHandle& fh) {
     Fattr3 attr;
     if (vfs_.getattr(fh, attr) == NfsStat3::NFS3_OK) {
@@ -80,6 +83,7 @@ void NfsServer::encode_post_op_attr(XdrEncoder& enc, const FileHandle& fh) {
     }
 }
 
+// RFC 1813 §2.6 - wcc_data (weak cache consistency: pre_op_attr + post_op_attr)
 void NfsServer::encode_wcc_data(XdrEncoder& enc, const FileHandle& fh) {
     // Simplified: no pre-op attributes
     enc.encode_bool(false);  // pre_op_attr: false

@@ -11,8 +11,8 @@
 #include "rpc/rpc_types.h"
 #include "xdr/xdr_codec.h"
 
+// RFC 5531 - ONC RPC v2
 // Callback receives decoded call header + decoder positioned at procedure args.
-// Must return an XdrEncoder containing the procedure reply body.
 using RpcProcedureHandler = std::function<void(
     const RpcCallHeader& call,
     XdrDecoder& args,

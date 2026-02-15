@@ -7,8 +7,7 @@
 #include <mutex>
 #include <sys/stat.h>
 
-// File handle: opaque identifier for a file/directory.
-// We use a fixed-size 64-byte handle (NFSv3 max is 64 bytes).
+// RFC 1813 §2.3.3 - nfs_fh3: opaque file handle (max 64 bytes)
 constexpr size_t NFS3_FHSIZE = 64;
 
 struct FileHandle {
@@ -19,6 +18,7 @@ struct FileHandle {
     bool operator<(const FileHandle& o) const;
 };
 
+// RFC 1813 §2.6 - nfsstat3: NFS status codes
 enum class NfsStat3 : uint32_t {
     NFS3_OK             = 0,
     NFS3ERR_PERM        = 1,
@@ -48,6 +48,7 @@ enum class NfsStat3 : uint32_t {
     NFS3ERR_SERVERFAULT = 10006,
 };
 
+// RFC 1813 §2.2 - ftype3: file types
 enum class Ftype3 : uint32_t {
     NF3REG  = 1,
     NF3DIR  = 2,
@@ -58,11 +59,13 @@ enum class Ftype3 : uint32_t {
     NF3FIFO = 7,
 };
 
+// RFC 1813 §2.5 - nfstime3
 struct NfsTime3 {
     uint32_t seconds = 0;
     uint32_t nseconds = 0;
 };
 
+// RFC 1813 §2.5 - fattr3: file attributes
 struct Fattr3 {
     Ftype3 type = Ftype3::NF3REG;
     uint32_t mode = 0;
@@ -80,6 +83,7 @@ struct Fattr3 {
     NfsTime3 ctime;
 };
 
+// RFC 1813 §2.5 - set_atime / set_mtime (part of sattr3)
 struct NfsTimeSet {
     enum class How : uint32_t {
         DONT_CHANGE = 0,
@@ -89,6 +93,7 @@ struct NfsTimeSet {
     NfsTime3 time;
 };
 
+// RFC 1813 §3.3.16 - entry3 (READDIR entry)
 struct DirEntry {
     uint64_t fileid;
     std::string name;

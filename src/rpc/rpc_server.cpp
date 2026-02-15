@@ -87,9 +87,10 @@ void RpcServer::accept_loop(int listen_fd) {
     }
 }
 
+// RFC 5531 §11 - Record Marking Standard (TCP)
+// Each record is a sequence of fragments; last fragment has bit 31 set in length header.
 void RpcServer::handle_client(int client_fd) {
     while (running_) {
-        // Reassemble multi-fragment RPC records (RFC 5531 §11)
         std::vector<uint8_t> record;
         bool complete = false;
 
@@ -123,6 +124,7 @@ void RpcServer::handle_client(int client_fd) {
     close(client_fd);
 }
 
+// RFC 5531 §7.1 - Decode call_body (xid, msg_type, rpcvers, prog, vers, proc, cred, verf)
 RpcCallHeader RpcServer::decode_call_header(XdrDecoder& dec) {
     RpcCallHeader call;
     call.xid = dec.decode_uint32();
@@ -146,6 +148,7 @@ RpcCallHeader RpcServer::decode_call_header(XdrDecoder& dec) {
     return call;
 }
 
+// RFC 5531 §8.2.2 - AUTH_SYS (stamp, machinename, uid, gid, gids)
 RpcAuthSys RpcServer::parse_auth_sys(const RpcOpaqueAuth& auth) {
     RpcAuthSys sys;
     if (auth.body.empty()) return sys;
@@ -161,6 +164,7 @@ RpcAuthSys RpcServer::parse_auth_sys(const RpcOpaqueAuth& auth) {
     return sys;
 }
 
+// RFC 5531 §7 - RPC message dispatch (program/version/procedure lookup)
 void RpcServer::process_rpc_message(const uint8_t* data, size_t len, int client_fd) {
     XdrDecoder dec(data, len);
     RpcCallHeader call;
@@ -202,6 +206,7 @@ void RpcServer::process_rpc_message(const uint8_t* data, size_t len, int client_
     send_accepted_reply(client_fd, call.xid, RpcAcceptStatus::SUCCESS, reply_body);
 }
 
+// RFC 5531 §7.2 - accepted_reply (MSG_ACCEPTED + accept_stat + result)
 void RpcServer::send_accepted_reply(int fd, uint32_t xid,
                                      RpcAcceptStatus status,
                                      const XdrEncoder& body) {
@@ -227,6 +232,7 @@ void RpcServer::send_accepted_reply(int fd, uint32_t xid,
     }
 }
 
+// RFC 5531 §7.2 - rejected_reply (MSG_DENIED + reject_stat)
 void RpcServer::send_denied_reply(int fd, uint32_t xid,
                                    RpcRejectStatus reject_stat,
                                    uint32_t low_ver, uint32_t high_ver) {
@@ -245,8 +251,8 @@ void RpcServer::send_denied_reply(int fd, uint32_t xid,
     }
 }
 
+// RFC 5531 §11 - Send with TCP record marking (last-fragment bit set)
 bool RpcServer::send_tcp(int fd, const uint8_t* data, size_t len) {
-    // TCP record marking: last-fragment bit set
     uint32_t hdr = htonl(static_cast<uint32_t>(len) | 0x80000000);
     if (send(fd, &hdr, 4, MSG_NOSIGNAL) != 4) return false;
     ssize_t sent = send(fd, data, len, MSG_NOSIGNAL);

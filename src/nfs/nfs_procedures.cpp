@@ -2,6 +2,7 @@
 #include "nfs/nfs_types.h"
 #include <cstring>
 
+// RFC 1813 §2.5 - Decode sattr3 (settable file attributes)
 NfsServer::Sattr3 NfsServer::decode_sattr3(XdrDecoder& args) {
     Sattr3 sa;
     if (args.decode_bool()) sa.mode = args.decode_uint32();
@@ -21,10 +22,12 @@ NfsServer::Sattr3 NfsServer::decode_sattr3(XdrDecoder& args) {
     return sa;
 }
 
+// RFC 1813 §3.3.0 Procedure 0: NULL - Do nothing
 void NfsServer::proc_null(const RpcCallHeader&, XdrDecoder&, XdrEncoder&) {
     // No-op.
 }
 
+// RFC 1813 §3.3.1 Procedure 1: GETATTR - Get file attributes
 void NfsServer::proc_getattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     Fattr3 attr;
@@ -35,6 +38,7 @@ void NfsServer::proc_getattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     }
 }
 
+// RFC 1813 §3.3.2 Procedure 2: SETATTR - Set file attributes
 void NfsServer::proc_setattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     Sattr3 sa = decode_sattr3(args);
@@ -70,6 +74,7 @@ void NfsServer::proc_setattr(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     encode_wcc_data(reply, fh);
 }
 
+// RFC 1813 §3.3.3 Procedure 3: LOOKUP - Lookup filename
 void NfsServer::proc_lookup(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
@@ -88,6 +93,7 @@ void NfsServer::proc_lookup(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     encode_post_op_attr(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.4 Procedure 4: ACCESS - Check access permission
 void NfsServer::proc_access(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     uint32_t requested = args.decode_uint32();
@@ -101,6 +107,7 @@ void NfsServer::proc_access(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     }
 }
 
+// RFC 1813 §3.3.5 Procedure 5: READLINK - Read from symbolic link
 void NfsServer::proc_readlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     std::string target;
@@ -112,6 +119,7 @@ void NfsServer::proc_readlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder
     }
 }
 
+// RFC 1813 §3.3.6 Procedure 6: READ - Read from file
 void NfsServer::proc_read(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     uint64_t offset = args.decode_uint64();
@@ -129,6 +137,7 @@ void NfsServer::proc_read(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& re
     }
 }
 
+// RFC 1813 §3.3.7 Procedure 7: WRITE - Write to file
 void NfsServer::proc_write(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     uint64_t offset = args.decode_uint64();
@@ -154,6 +163,7 @@ void NfsServer::proc_write(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     }
 }
 
+// RFC 1813 §3.3.8 Procedure 8: CREATE - Create a file
 void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
@@ -195,6 +205,7 @@ void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.9 Procedure 9: MKDIR - Create a directory
 void NfsServer::proc_mkdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
@@ -215,6 +226,7 @@ void NfsServer::proc_mkdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.10 Procedure 10: SYMLINK - Create a symbolic link
 void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
@@ -234,6 +246,7 @@ void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.11 Procedure 11: MKNOD - Create a special device
 void NfsServer::proc_mknod(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     args.decode_string(); // name
@@ -254,6 +267,7 @@ void NfsServer::proc_mknod(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.12 Procedure 12: REMOVE - Remove a file
 void NfsServer::proc_remove(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
@@ -262,6 +276,7 @@ void NfsServer::proc_remove(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.13 Procedure 13: RMDIR - Remove a directory
 void NfsServer::proc_rmdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     std::string name = args.decode_string();
@@ -270,6 +285,7 @@ void NfsServer::proc_rmdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& r
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.14 Procedure 14: RENAME - Rename a file or directory
 void NfsServer::proc_rename(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle from_dir = decode_fh(args);
     std::string from_name = args.decode_string();
@@ -282,6 +298,7 @@ void NfsServer::proc_rename(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     encode_wcc_data(reply, to_dir);
 }
 
+// RFC 1813 §3.3.15 Procedure 15: LINK - Create link to an object
 void NfsServer::proc_link(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     FileHandle dir_fh = decode_fh(args);
@@ -293,6 +310,7 @@ void NfsServer::proc_link(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& re
     encode_wcc_data(reply, dir_fh);
 }
 
+// RFC 1813 §3.3.16 Procedure 16: READDIR - Read from directory
 void NfsServer::proc_readdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     uint64_t cookie = args.decode_uint64();
@@ -317,6 +335,7 @@ void NfsServer::proc_readdir(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
     }
 }
 
+// RFC 1813 §3.3.17 Procedure 17: READDIRPLUS - Extended read from directory
 void NfsServer::proc_readdirplus(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
     uint64_t cookie = args.decode_uint64();
@@ -346,6 +365,7 @@ void NfsServer::proc_readdirplus(const RpcCallHeader&, XdrDecoder& args, XdrEnco
     }
 }
 
+// RFC 1813 §3.3.18 Procedure 18: FSSTAT - Get dynamic file system information
 void NfsServer::proc_fsstat(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
 
@@ -364,6 +384,7 @@ void NfsServer::proc_fsstat(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     }
 }
 
+// RFC 1813 §3.3.19 Procedure 19: FSINFO - Get static file system information
 void NfsServer::proc_fsinfo(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
 
@@ -389,6 +410,7 @@ void NfsServer::proc_fsinfo(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     }
 }
 
+// RFC 1813 §3.3.20 Procedure 20: PATHCONF - Retrieve POSIX information
 void NfsServer::proc_pathconf(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
 
@@ -406,6 +428,7 @@ void NfsServer::proc_pathconf(const RpcCallHeader&, XdrDecoder& args, XdrEncoder
     }
 }
 
+// RFC 1813 §3.3.21 Procedure 21: COMMIT - Commit cached data on a server to stable storage
 void NfsServer::proc_commit(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     uint64_t offset = args.decode_uint64();

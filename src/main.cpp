@@ -1,3 +1,7 @@
+// NFSv3 server entry point.
+// MOUNT v3 (RFC 1813 Appendix I) and NFS v3 (RFC 1813) share a single
+// RPC server on one TCP port — no portmapper/rpcbind required.
+
 #include "rpc/rpc_server.h"
 #include "rpc/rpc_types.h"
 #include "mount/mount_server.h"

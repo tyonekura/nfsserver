@@ -2,14 +2,15 @@
 
 #include <cstdint>
 
-// MOUNT v3 protocol constants per RFC 1813 Appendix I
-constexpr uint32_t MOUNTPROC3_NULL   = 0;
-constexpr uint32_t MOUNTPROC3_MNT    = 1;
-constexpr uint32_t MOUNTPROC3_DUMP   = 2;
-constexpr uint32_t MOUNTPROC3_UMNT   = 3;
-constexpr uint32_t MOUNTPROC3_UMNTALL = 4;
-constexpr uint32_t MOUNTPROC3_EXPORT = 5;
+// RFC 1813 Appendix I - MOUNT v3 procedure numbers
+constexpr uint32_t MOUNTPROC3_NULL   = 0;  // RFC 1813 §A.5.1 - Procedure 0: Null
+constexpr uint32_t MOUNTPROC3_MNT    = 1;  // RFC 1813 §A.5.2 - Procedure 1: MNT
+constexpr uint32_t MOUNTPROC3_DUMP   = 2;  // RFC 1813 §A.5.3 - Procedure 2: DUMP
+constexpr uint32_t MOUNTPROC3_UMNT   = 3;  // RFC 1813 §A.5.4 - Procedure 3: UMNT
+constexpr uint32_t MOUNTPROC3_UMNTALL = 4; // RFC 1813 §A.5.5 - Procedure 4: UMNTALL
+constexpr uint32_t MOUNTPROC3_EXPORT = 5;  // RFC 1813 §A.5.6 - Procedure 5: EXPORT
 
+// RFC 1813 Appendix I - mountstat3
 enum class MountStat3 : uint32_t {
     MNT3_OK             = 0,
     MNT3ERR_PERM        = 1,
