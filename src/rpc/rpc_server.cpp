@@ -175,12 +175,14 @@ void RpcServer::process_rpc_message(const uint8_t* data, size_t len, int client_
     }
 
     if (call.rpc_version != 2) {
+        std::cerr << "RPC version mismatch: " << call.rpc_version << std::endl;
         send_denied_reply(client_fd, call.xid, RpcRejectStatus::RPC_MISMATCH, 2, 2);
         return;
     }
 
     auto it = programs_.find({call.program, call.version});
     if (it == programs_.end()) {
+        std::cerr << "RPC: program/version not found" << std::endl;
         XdrEncoder body;
         send_accepted_reply(client_fd, call.xid, RpcAcceptStatus::PROG_UNAVAIL, body);
         return;

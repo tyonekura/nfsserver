@@ -13,6 +13,9 @@ add_library(nfs_lib STATIC
     src/mount/mount_server.cpp
     src/nfs/nfs_server.cpp
     src/nfs/nfs_procedures.cpp
+    src/nfs4/nfs4_attrs.cpp
+    src/nfs4/nfs4_state.cpp
+    src/nfs4/nfs4_server.cpp
 )
 target_include_directories(nfs_lib PUBLIC src)
 target_compile_options(nfs_lib PRIVATE -Wall -Wextra -Wpedantic)
