@@ -65,6 +65,11 @@ public:
     Nfs4Stat close_file(const Nfs4StateId& stateid, uint32_t seqid,
                          Nfs4StateId& out_stateid);
 
+    // RFC 7530 §16.19 - OPEN_DOWNGRADE
+    Nfs4Stat open_downgrade(const Nfs4StateId& stateid, uint32_t seqid,
+                             uint32_t access, uint32_t deny,
+                             Nfs4StateId& out_stateid);
+
     // RFC 7530 §16.27 - RENEW
     Nfs4Stat renew(uint64_t clientid);
 

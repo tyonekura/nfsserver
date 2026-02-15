@@ -261,24 +261,46 @@ void NfsServer::proc_symlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder&
 // RFC 1813 §3.3.11 Procedure 11: MKNOD - Create a special device
 void NfsServer::proc_mknod(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle dir_fh = decode_fh(args);
-    args.decode_string(); // name
+    std::string name = args.decode_string();
 
-    // Fully consume mknoddata3 to leave decoder in clean state
     uint32_t ftype = args.decode_uint32();
+    Sattr3 sa;
+    uint32_t spec_major = 0, spec_minor = 0;
+
     if (ftype == static_cast<uint32_t>(Ftype3::NF3CHR) ||
         ftype == static_cast<uint32_t>(Ftype3::NF3BLK)) {
-        decode_sattr3(args);
-        args.decode_uint32(); // specdata major
-        args.decode_uint32(); // specdata minor
+        sa = decode_sattr3(args);
+        spec_major = args.decode_uint32();
+        spec_minor = args.decode_uint32();
     } else if (ftype == static_cast<uint32_t>(Ftype3::NF3SOCK) ||
                ftype == static_cast<uint32_t>(Ftype3::NF3FIFO)) {
-        decode_sattr3(args);
+        sa = decode_sattr3(args);
+    } else {
+        Fattr3 dir_pre;
+        bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
+        reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_INVAL));
+        encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
+        return;
     }
 
     Fattr3 dir_pre;
     bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
 
-    reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_NOTSUPP));
+    uint32_t mode = (sa.mode != UINT32_MAX) ? sa.mode : 0644u;
+    FileHandle out_fh;
+    Fattr3 out_attr;
+    NfsStat3 status = vfs_.mknod(dir_fh, name, static_cast<Ftype3>(ftype),
+                                  mode, spec_major, spec_minor, out_fh, out_attr);
+
+    reply.encode_uint32(static_cast<uint32_t>(status));
+    if (status == NfsStat3::NFS3_OK) {
+        // post_op_fh3
+        reply.encode_bool(true);
+        reply.encode_opaque(out_fh.data, out_fh.len);
+        // post_op_attr
+        reply.encode_bool(true);
+        encode_fattr3(reply, out_attr);
+    }
     encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
 }
 

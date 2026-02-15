@@ -4,6 +4,33 @@
 #include <chrono>
 #include <cstring>
 
+// RFC 7530 §14.1 - UTF-8 string validation
+static bool is_valid_utf8(const std::string& s) {
+    const auto* p = reinterpret_cast<const uint8_t*>(s.data());
+    const auto* end = p + s.size();
+    while (p < end) {
+        if (*p < 0x80) { p++; }
+        else if ((*p & 0xE0) == 0xC0) {
+            if (p + 1 >= end || (p[1] & 0xC0) != 0x80) return false;
+            if (*p < 0xC2) return false; // overlong
+            p += 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            if (p + 2 >= end || (p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80) return false;
+            uint32_t cp = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+            if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+            p += 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            if (p + 3 >= end || (p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80 || (p[3] & 0xC0) != 0x80) return false;
+            uint32_t cp = ((*p & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+            if (cp < 0x10000 || cp > 0x10FFFF) return false;
+            p += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 // RFC 7530 - NFS Version 4 Protocol Server Implementation
 
 Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
@@ -27,6 +54,7 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOOKUPP)]             = &Nfs4Server::op_lookupp;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_OPEN)]                = &Nfs4Server::op_open;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_OPEN_CONFIRM)]        = &Nfs4Server::op_open_confirm;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_OPEN_DOWNGRADE)]     = &Nfs4Server::op_open_downgrade;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_PUTFH)]               = &Nfs4Server::op_putfh;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_PUTROOTFH)]           = &Nfs4Server::op_putrootfh;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_READ)]                = &Nfs4Server::op_read;
@@ -40,6 +68,8 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETATTR)]             = &Nfs4Server::op_setattr;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETCLIENTID)]         = &Nfs4Server::op_setclientid;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETCLIENTID_CONFIRM)] = &Nfs4Server::op_setclientid_confirm;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_VERIFY)]             = &Nfs4Server::op_verify;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_NVERIFY)]            = &Nfs4Server::op_nverify;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_WRITE)]               = &Nfs4Server::op_write;
 }
 
@@ -56,7 +86,7 @@ void Nfs4Server::proc_null(const RpcCallHeader&, XdrDecoder&, XdrEncoder&) {
 }
 
 // RFC 7530 §16.2 Procedure 1: COMPOUND
-void Nfs4Server::proc_compound(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
+void Nfs4Server::proc_compound(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply) {
     std::string tag = args.decode_string();
     uint32_t minorversion = args.decode_uint32();
     uint32_t num_ops = args.decode_uint32();
@@ -69,6 +99,14 @@ void Nfs4Server::proc_compound(const RpcCallHeader&, XdrDecoder& args, XdrEncode
     }
 
     CompoundState cs;
+
+    // Extract AUTH_SYS credentials if present
+    if (call.credential.flavor == RpcAuthFlavor::AUTH_SYS) {
+        auto auth = RpcServer::parse_auth_sys(call.credential);
+        cs.uid = auth.uid;
+        cs.gid = auth.gid;
+        cs.gids = auth.gids;
+    }
     Nfs4Stat last_status = Nfs4Stat::NFS4_OK;
 
     // Buffer individual op results, then assemble the final reply
@@ -217,6 +255,7 @@ Nfs4Stat Nfs4Server::op_lookup(CompoundState& cs, XdrDecoder& args, XdrEncoder&)
     if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
 
     std::string name = args.decode_string();
+    if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
     FileHandle out_fh;
     Fattr3 out_attr;
     NfsStat3 s = vfs_.lookup(cs.current_fh, name, out_fh, out_attr);
@@ -301,6 +340,7 @@ Nfs4Stat Nfs4Server::op_link(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
 
     std::string newname = args.decode_string();
+    if (!is_valid_utf8(newname)) return Nfs4Stat::NFS4ERR_INVAL;
 
     // Get before change info for target directory
     Fattr3 before_attr;
@@ -394,6 +434,7 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     uint32_t opentype = args.decode_uint32();
     uint32_t create_mode = 0;
     uint32_t file_mode = 0644;
+    uint64_t create_verf = 0;
     if (opentype == OPEN4_CREATE) {
         create_mode = args.decode_uint32();
         if (create_mode == UNCHECKED4 || create_mode == GUARDED4) {
@@ -401,8 +442,7 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
             auto sa = decode_fattr4_setattr(args);
             if (sa.mode != UINT32_MAX) file_mode = sa.mode;
         } else if (create_mode == EXCLUSIVE4) {
-            // createverf: 8 bytes
-            args.decode_uint64();
+            create_verf = args.decode_uint64();
         }
     }
 
@@ -411,6 +451,7 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     std::string name;
     if (claim_type == CLAIM_NULL) {
         name = args.decode_string();
+        if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
     } else {
         // Other claim types not supported
         return Nfs4Stat::NFS4ERR_NOTSUPP;
@@ -431,13 +472,34 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     NfsStat3 lookup_s = vfs_.lookup(dir_fh, name, file_fh, file_attr);
 
     if (opentype == OPEN4_CREATE) {
-        if (lookup_s == NfsStat3::NFS3_OK && create_mode == GUARDED4) {
+        if (create_mode == GUARDED4 && lookup_s == NfsStat3::NFS3_OK) {
             return Nfs4Stat::NFS4ERR_EXIST;
         }
-        if (lookup_s != NfsStat3::NFS3_OK) {
+        if (create_mode == EXCLUSIVE4 && lookup_s == NfsStat3::NFS3_OK) {
+            // RFC 7530 §16.16.4 - EXCLUSIVE4: if file exists, check verifier
+            // stored in atime/mtime. If matches, return success (replay).
+            uint32_t v_hi = static_cast<uint32_t>(create_verf >> 32);
+            uint32_t v_lo = static_cast<uint32_t>(create_verf & 0xFFFFFFFF);
+            if (file_attr.atime.seconds != v_hi || file_attr.mtime.seconds != v_lo) {
+                return Nfs4Stat::NFS4ERR_EXIST;
+            }
+            // Verifier matches — treat as successful replay
+        } else if (lookup_s != NfsStat3::NFS3_OK) {
             // Create the file
             NfsStat3 cs2 = vfs_.create(dir_fh, name, file_mode, file_fh, file_attr);
             if (cs2 != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(cs2);
+            if (create_mode == EXCLUSIVE4) {
+                // Store verifier in atime/mtime
+                NfsTimeSet at, mt;
+                at.how = NfsTimeSet::How::SET_TO_CLIENT_TIME;
+                at.time.seconds = static_cast<uint32_t>(create_verf >> 32);
+                at.time.nseconds = 0;
+                mt.how = NfsTimeSet::How::SET_TO_CLIENT_TIME;
+                mt.time.seconds = static_cast<uint32_t>(create_verf & 0xFFFFFFFF);
+                mt.time.nseconds = 0;
+                vfs_.setattr(file_fh, UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                             UINT64_MAX, at, mt);
+            }
         }
     } else {
         // NOCREATE - file must exist
@@ -497,6 +559,23 @@ Nfs4Stat Nfs4Server::op_open_confirm(CompoundState&, XdrDecoder& args, XdrEncode
     if (s != Nfs4Stat::NFS4_OK) return s;
 
     // Encode stateid
+    enc.encode_uint32(out_stateid.seqid);
+    enc.encode_opaque_fixed(out_stateid.other, 12);
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.19 - OPEN_DOWNGRADE
+Nfs4Stat Nfs4Server::op_open_downgrade(CompoundState&, XdrDecoder& args, XdrEncoder& enc) {
+    Nfs4StateId stateid;
+    decode_stateid(args, stateid);
+    uint32_t seqid = args.decode_uint32();
+    uint32_t share_access = args.decode_uint32();
+    uint32_t share_deny = args.decode_uint32();
+
+    Nfs4StateId out_stateid;
+    Nfs4Stat s = state_.open_downgrade(stateid, seqid, share_access, share_deny, out_stateid);
+    if (s != Nfs4Stat::NFS4_OK) return s;
+
     enc.encode_uint32(out_stateid.seqid);
     enc.encode_opaque_fixed(out_stateid.other, 12);
     return Nfs4Stat::NFS4_OK;
@@ -618,6 +697,7 @@ Nfs4Stat Nfs4Server::op_create(CompoundState& cs, XdrDecoder& args, XdrEncoder& 
     }
 
     std::string name = args.decode_string();
+    if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
 
     // createattrs (fattr4)
     auto sa = decode_fattr4_setattr(args);
@@ -670,6 +750,7 @@ Nfs4Stat Nfs4Server::op_remove(CompoundState& cs, XdrDecoder& args, XdrEncoder& 
     if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
 
     std::string name = args.decode_string();
+    if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
 
     // Get before change info
     Fattr3 before_attr;
@@ -705,6 +786,8 @@ Nfs4Stat Nfs4Server::op_rename(CompoundState& cs, XdrDecoder& args, XdrEncoder& 
 
     std::string oldname = args.decode_string();
     std::string newname = args.decode_string();
+    if (!is_valid_utf8(oldname) || !is_valid_utf8(newname))
+        return Nfs4Stat::NFS4ERR_INVAL;
 
     // saved_fh = source dir, current_fh = target dir
     Fattr3 src_before, dst_before;
@@ -733,4 +816,49 @@ Nfs4Stat Nfs4Server::op_rename(CompoundState& cs, XdrDecoder& args, XdrEncoder& 
     enc.encode_uint64(make_change(dst_after));
 
     return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.31 - VERIFY / §16.14 - NVERIFY common logic
+Nfs4Stat Nfs4Server::verify_common(CompoundState& cs, XdrDecoder& args, bool negate) {
+    if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    // Decode the client-supplied fattr4 (bitmap + opaque attr data)
+    auto client_bm = decode_bitmap(args);
+    auto client_attr_data = args.decode_opaque();
+
+    // Get actual file attributes
+    Fattr3 attr;
+    NfsStat3 s = vfs_.getattr(cs.current_fh, attr);
+    if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
+
+    // Encode server's fattr4 using the same bitmap the client requested
+    XdrEncoder server_enc;
+    encode_fattr4(server_enc, client_bm, attr, cs.current_fh);
+
+    // The encode_fattr4 output includes the result bitmap + opaque attr data.
+    // We need to extract just the opaque attr data for comparison.
+    // Re-decode the server-encoded fattr4 to get the attr data portion.
+    XdrDecoder server_dec(server_enc.data().data(), server_enc.size());
+    auto server_bm = decode_bitmap(server_dec);
+    auto server_attr_data = server_dec.decode_opaque();
+
+    bool match = (client_attr_data == server_attr_data);
+
+    if (negate) {
+        // NVERIFY: succeed if attrs DON'T match (so client can proceed)
+        return match ? Nfs4Stat::NFS4ERR_SAME : Nfs4Stat::NFS4_OK;
+    } else {
+        // VERIFY: succeed if attrs DO match
+        return match ? Nfs4Stat::NFS4_OK : Nfs4Stat::NFS4ERR_NOT_SAME;
+    }
+}
+
+// RFC 7530 §16.31 - VERIFY
+Nfs4Stat Nfs4Server::op_verify(CompoundState& cs, XdrDecoder& args, XdrEncoder&) {
+    return verify_common(cs, args, false);
+}
+
+// RFC 7530 §16.14 - NVERIFY
+Nfs4Stat Nfs4Server::op_nverify(CompoundState& cs, XdrDecoder& args, XdrEncoder&) {
+    return verify_common(cs, args, true);
 }

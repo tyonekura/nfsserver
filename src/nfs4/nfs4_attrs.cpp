@@ -1,5 +1,53 @@
 #include "nfs4/nfs4_attrs.h"
+#include <pwd.h>
+#include <grp.h>
 #include <string>
+
+// RFC 7530 §5.8.2.2 - owner/owner_group as "user@domain" strings
+static const std::string nfs4_domain = "localdomain";
+
+static std::string uid_to_owner(uint32_t uid) {
+    struct passwd* pw = getpwuid(uid);
+    if (pw)
+        return std::string(pw->pw_name) + "@" + nfs4_domain;
+    return std::to_string(uid);
+}
+
+static std::string gid_to_group(uint32_t gid) {
+    struct group* gr = getgrgid(gid);
+    if (gr)
+        return std::string(gr->gr_name) + "@" + nfs4_domain;
+    return std::to_string(gid);
+}
+
+static uint32_t owner_to_uid(const std::string& owner_str) {
+    // Strip @domain if present
+    std::string name = owner_str;
+    auto at = name.find('@');
+    if (at != std::string::npos)
+        name = name.substr(0, at);
+
+    // Try numeric first
+    try { return static_cast<uint32_t>(std::stoul(name)); } catch (...) {}
+
+    // Try passwd lookup
+    struct passwd* pw = getpwnam(name.c_str());
+    if (pw) return pw->pw_uid;
+    return UINT32_MAX;
+}
+
+static uint32_t group_to_gid(const std::string& group_str) {
+    std::string name = group_str;
+    auto at = name.find('@');
+    if (at != std::string::npos)
+        name = name.substr(0, at);
+
+    try { return static_cast<uint32_t>(std::stoul(name)); } catch (...) {}
+
+    struct group* gr = getgrnam(name.c_str());
+    if (gr) return gr->gr_gid;
+    return UINT32_MAX;
+}
 
 // RFC 7530 §5.8 - NFSv4 bitmap-based attribute encoding
 
@@ -201,10 +249,10 @@ void encode_fattr4(XdrEncoder& enc,
         attr_data.encode_uint32(attr.nlink);
     }
     if (bitmap_isset(result, FATTR4_OWNER)) {             // 36
-        attr_data.encode_string(std::to_string(attr.uid));
+        attr_data.encode_string(uid_to_owner(attr.uid));
     }
     if (bitmap_isset(result, FATTR4_OWNER_GROUP)) {       // 37
-        attr_data.encode_string(std::to_string(attr.gid));
+        attr_data.encode_string(gid_to_group(attr.gid));
     }
     // 38 QUOTA_AVAIL_HARD - not supported
     // 39 QUOTA_AVAIL_SOFT - not supported
@@ -269,11 +317,11 @@ Nfs4SetAttr decode_fattr4_setattr(XdrDecoder& dec) {
     }
     if (bitmap_isset(bm, FATTR4_OWNER)) {
         std::string owner_str = attr_dec.decode_string();
-        try { sa.uid = std::stoul(owner_str); } catch (...) {}
+        sa.uid = owner_to_uid(owner_str);
     }
     if (bitmap_isset(bm, FATTR4_OWNER_GROUP)) {
         std::string group_str = attr_dec.decode_string();
-        try { sa.gid = std::stoul(group_str); } catch (...) {}
+        sa.gid = group_to_gid(group_str);
     }
     if (bitmap_isset(bm, FATTR4_TIME_ACCESS_SET)) {
         // set_atime4: 0=SET_TO_SERVER_TIME4, 1=SET_TO_CLIENT_TIME4

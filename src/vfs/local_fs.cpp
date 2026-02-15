@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 LocalFs::LocalFs(const std::string& export_root)
@@ -470,5 +471,47 @@ NfsStat3 LocalFs::commit(const FileHandle& fh, uint64_t /*offset*/, uint32_t /*c
     if (fd < 0) return errno_to_nfsstat();
     fsync(fd);
     close(fd);
+    return NfsStat3::NFS3_OK;
+}
+
+NfsStat3 LocalFs::mknod(const FileHandle& dir_fh, const std::string& name,
+                          Ftype3 type, uint32_t mode,
+                          uint32_t rdev_major, uint32_t rdev_minor,
+                          FileHandle& out_fh, Fattr3& out_attr) {
+    std::string dir_path = resolve_path(dir_fh);
+    if (dir_path.empty()) return NfsStat3::NFS3ERR_STALE;
+
+    std::string full = dir_path + "/" + name;
+    mode_t dev_mode = mode;
+    dev_t dev = 0;
+
+    switch (type) {
+        case Ftype3::NF3CHR:
+            dev_mode |= S_IFCHR;
+            dev = makedev(rdev_major, rdev_minor);
+            break;
+        case Ftype3::NF3BLK:
+            dev_mode |= S_IFBLK;
+            dev = makedev(rdev_major, rdev_minor);
+            break;
+        case Ftype3::NF3SOCK:
+            dev_mode |= S_IFSOCK;
+            break;
+        case Ftype3::NF3FIFO:
+            dev_mode |= S_IFIFO;
+            break;
+        default:
+            return NfsStat3::NFS3ERR_INVAL;
+    }
+
+    if (::mknod(full.c_str(), dev_mode, dev) != 0)
+        return errno_to_nfsstat();
+
+    struct stat st;
+    if (lstat(full.c_str(), &st) != 0) return errno_to_nfsstat();
+
+    out_fh = make_handle(st.st_ino, st.st_dev);
+    cache_path(out_fh, full);
+    out_attr = stat_to_fattr(st);
     return NfsStat3::NFS3_OK;
 }

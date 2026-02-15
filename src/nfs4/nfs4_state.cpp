@@ -260,6 +260,36 @@ Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
     return Nfs4Stat::NFS4_OK;
 }
 
+// RFC 7530 §16.19 - OPEN_DOWNGRADE
+Nfs4Stat Nfs4StateManager::open_downgrade(const Nfs4StateId& stateid,
+                                            uint32_t seqid,
+                                            uint32_t access, uint32_t deny,
+                                            Nfs4StateId& out_stateid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto* os = find_open_state(stateid);
+    if (!os) return Nfs4Stat::NFS4ERR_BAD_STATEID;
+
+    if (seqid != os->open_seqid + 1)
+        return Nfs4Stat::NFS4ERR_BAD_SEQID;
+
+    // New access must be a subset of current access
+    if ((access & os->access) != access)
+        return Nfs4Stat::NFS4ERR_INVAL;
+
+    os->access = access;
+    os->deny = deny;
+    os->stateid.seqid++;
+    os->open_seqid = seqid;
+    out_stateid = os->stateid;
+
+    auto cit = clients_.find(os->clientid);
+    if (cit != clients_.end())
+        cit->second.last_renewed = std::chrono::steady_clock::now();
+
+    return Nfs4Stat::NFS4_OK;
+}
+
 // RFC 7530 §16.27 - RENEW
 Nfs4Stat Nfs4StateManager::renew(uint64_t clientid) {
     std::lock_guard<std::mutex> lk(mu_);

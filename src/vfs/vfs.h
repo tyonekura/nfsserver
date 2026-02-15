@@ -146,6 +146,10 @@ public:
                                uint32_t& name_max) = 0;
     virtual NfsStat3 commit(const FileHandle& fh, uint64_t offset,
                              uint32_t count) = 0;
+    virtual NfsStat3 mknod(const FileHandle& dir_fh, const std::string& name,
+                            Ftype3 type, uint32_t mode,
+                            uint32_t rdev_major, uint32_t rdev_minor,
+                            FileHandle& out_fh, Fattr3& out_attr) = 0;
 
     // Get file handle for export root path.
     virtual NfsStat3 get_root_fh(const std::string& path, FileHandle& fh) = 0;

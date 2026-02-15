@@ -27,6 +27,7 @@ enum class Nfs4Op : uint32_t {
     OP_LOOKUPP             = 16,
     OP_OPEN                = 18,
     OP_OPEN_CONFIRM        = 20,
+    OP_OPEN_DOWNGRADE      = 21,
     OP_PUTFH               = 22,
     OP_PUTROOTFH           = 24,
     OP_READ                = 25,
@@ -40,7 +41,9 @@ enum class Nfs4Op : uint32_t {
     OP_SETATTR             = 34,
     OP_SETCLIENTID         = 35,
     OP_SETCLIENTID_CONFIRM = 36,
+    OP_VERIFY              = 37,
     OP_WRITE               = 38,
+    OP_NVERIFY             = 14,
     OP_ILLEGAL             = 10044,
 };
 
@@ -81,8 +84,10 @@ enum class Nfs4Stat : uint32_t {
     NFS4ERR_OLD_STATEID        = 10024,
     NFS4ERR_BAD_STATEID        = 10025,
     NFS4ERR_BAD_SEQID          = 10026,
+    NFS4ERR_NOT_SAME           = 10027,
     NFS4ERR_RESOURCE           = 10018,
     NFS4ERR_NOFILEHANDLE       = 10020,
+    NFS4ERR_SAME               = 10009,
     NFS4ERR_OP_ILLEGAL         = 10044,
 };
 
