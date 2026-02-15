@@ -243,6 +243,260 @@ TEST(Nfs4State, BadSeqid) {
     EXPECT_EQ(mgr.close_file(confirmed_sid, 3, closed_sid), Nfs4Stat::NFS4_OK);
 }
 
+// --- Lock tests ---
+
+// Helper: set up a confirmed client and open state for lock testing
+struct LockTestFixture {
+    Nfs4StateManager mgr;
+    uint64_t clientid = 0;
+    Nfs4StateId open_stateid;
+    FileHandle fh;
+    uint32_t next_open_seqid = 0;
+
+    LockTestFixture() {
+        uint8_t verifier[8] = {1};
+        std::vector<uint8_t> cid = {1};
+        auto [cid_out, confirm] = mgr.set_clientid(verifier, cid);
+        clientid = cid_out;
+        mgr.confirm_clientid(clientid, confirm.data());
+
+        fh.len = 16;
+        fh.data[0] = 42;
+        std::vector<uint8_t> owner = {1, 2, 3};
+        bool needs_confirm = false;
+
+        mgr.open_file(clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_BOTH,
+                       OPEN4_SHARE_DENY_NONE, open_stateid, needs_confirm);
+        Nfs4StateId confirmed_sid;
+        mgr.confirm_open(open_stateid, 2, confirmed_sid);
+        open_stateid = confirmed_sid;
+        next_open_seqid = 3;
+    }
+};
+
+TEST(Nfs4Lock, WriteWriteConflict) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4StateId lock_sid1, lock_sid2;
+    Nfs4LockDenied denied;
+
+    // Owner1 gets a WRITE lock [0, 100)
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid1, denied), Nfs4Stat::NFS4_OK);
+
+    // Owner2 tries overlapping WRITE lock → DENIED
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner2, 0, f.fh, WRITE_LT, 50, 100,
+                              lock_sid2, denied), Nfs4Stat::NFS4ERR_DENIED);
+    EXPECT_EQ(denied.locktype, WRITE_LT);
+    EXPECT_EQ(denied.offset, 0u);
+    EXPECT_EQ(denied.length, 100u);
+}
+
+TEST(Nfs4Lock, ReadReadNoConflict) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4StateId lock_sid1, lock_sid2;
+    Nfs4LockDenied denied;
+
+    // Owner1 READ lock
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, READ_LT, 0, 100,
+                              lock_sid1, denied), Nfs4Stat::NFS4_OK);
+
+    // Owner2 READ lock on same range → OK
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner2, 0, f.fh, READ_LT, 0, 100,
+                              lock_sid2, denied), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Lock, ReadWriteConflict) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4StateId lock_sid1, lock_sid2;
+    Nfs4LockDenied denied;
+
+    // Owner1 READ lock
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, READ_LT, 0, 100,
+                              lock_sid1, denied), Nfs4Stat::NFS4_OK);
+
+    // Owner2 WRITE lock → DENIED
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner2, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid2, denied), Nfs4Stat::NFS4ERR_DENIED);
+}
+
+TEST(Nfs4Lock, SameOwnerNoConflict) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4StateId lock_sid;
+    Nfs4LockDenied denied;
+
+    // Same owner can hold overlapping READ+WRITE
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, READ_LT, 0, 100,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // Same owner, WRITE on overlapping range → OK
+    Nfs4StateId lock_sid2;
+    EXPECT_EQ(f.mgr.lock_existing(lock_sid, 1, WRITE_LT, 50, 100,
+                                   lock_sid2, denied), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Lock, LockUnlockRelock) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4StateId lock_sid, lock_sid2;
+    Nfs4LockDenied denied;
+
+    // Owner1 WRITE lock [0, 100)
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // Unlock it
+    Nfs4StateId unlocked_sid;
+    EXPECT_EQ(f.mgr.lock_unlock(lock_sid, 1, 0, 100, unlocked_sid), Nfs4Stat::NFS4_OK);
+
+    // Now owner2 can lock the same range
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner2, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid2, denied), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Lock, BadSeqid) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4StateId lock_sid;
+    Nfs4LockDenied denied;
+
+    // Get a lock
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // Try to extend with wrong seqid
+    Nfs4StateId lock_sid2;
+    EXPECT_EQ(f.mgr.lock_existing(lock_sid, 99, WRITE_LT, 200, 100,
+                                   lock_sid2, denied), Nfs4Stat::NFS4ERR_BAD_SEQID);
+
+    // Try unlock with wrong seqid
+    Nfs4StateId unlocked_sid;
+    EXPECT_EQ(f.mgr.lock_unlock(lock_sid, 99, 0, 100, unlocked_sid),
+              Nfs4Stat::NFS4ERR_BAD_SEQID);
+}
+
+TEST(Nfs4Lock, LockTest) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4StateId lock_sid;
+    Nfs4LockDenied denied;
+
+    // Owner1 WRITE lock
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // LOCKT from owner2 → DENIED (no state change)
+    EXPECT_EQ(f.mgr.lock_test(f.fh, WRITE_LT, 0, 100, owner2, denied),
+              Nfs4Stat::NFS4ERR_DENIED);
+    EXPECT_EQ(denied.owner.owner, owner1.owner);
+
+    // LOCKT for non-overlapping range → OK
+    EXPECT_EQ(f.mgr.lock_test(f.fh, WRITE_LT, 200, 100, owner2, denied),
+              Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Lock, ReleaseLockOwner) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4StateId lock_sid;
+    Nfs4LockDenied denied;
+
+    // Owner1 WRITE lock
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // Release owner1's lock state
+    EXPECT_EQ(f.mgr.release_lock_owner(owner1), Nfs4Stat::NFS4_OK);
+
+    // Now owner2 can lock the range
+    Nfs4StateId lock_sid2;
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner2, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid2, denied), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Lock, CloseWithLocksHeld) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4StateId lock_sid;
+    Nfs4LockDenied denied;
+
+    // Take a lock
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // CLOSE should fail with LOCKS_HELD
+    Nfs4StateId closed_sid;
+    EXPECT_EQ(f.mgr.close_file(f.open_stateid, f.next_open_seqid,
+                                closed_sid), Nfs4Stat::NFS4ERR_LOCKS_HELD);
+
+    // Unlock
+    Nfs4StateId unlocked_sid;
+    EXPECT_EQ(f.mgr.lock_unlock(lock_sid, 1, 0, 100, unlocked_sid), Nfs4Stat::NFS4_OK);
+
+    // Now CLOSE succeeds
+    EXPECT_EQ(f.mgr.close_file(f.open_stateid, f.next_open_seqid,
+                                closed_sid), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Lock, RangeSplit) {
+    LockTestFixture f;
+    Nfs4LockOwner owner1{f.clientid, {10}};
+    Nfs4LockOwner owner2{f.clientid, {20}};
+    Nfs4LockOwner owner3{f.clientid, {30}};
+    Nfs4StateId lock_sid;
+    Nfs4LockDenied denied;
+
+    // Owner1 WRITE lock [0, 1000)
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner1, 0, f.fh, WRITE_LT, 0, 1000,
+                              lock_sid, denied), Nfs4Stat::NFS4_OK);
+
+    // Unlock middle [300, 600) — splits into [0,300) and [600,1000)
+    Nfs4StateId unlocked_sid;
+    EXPECT_EQ(f.mgr.lock_unlock(lock_sid, 1, 300, 300, unlocked_sid), Nfs4Stat::NFS4_OK);
+
+    // Owner2 can lock the gap [300, 600)
+    Nfs4StateId lock_sid2;
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner2, 0, f.fh, WRITE_LT, 300, 300,
+                              lock_sid2, denied), Nfs4Stat::NFS4_OK);
+
+    // Owner3 cannot lock [0, 100) — still held by owner1
+    Nfs4StateId lock_sid3;
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner3, 0, f.fh, WRITE_LT, 0, 100,
+                              lock_sid3, denied), Nfs4Stat::NFS4ERR_DENIED);
+
+    // Owner3 cannot lock [600, 700) — still held by owner1
+    Nfs4StateId lock_sid4;
+    EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
+                              owner3, 0, f.fh, WRITE_LT, 600, 100,
+                              lock_sid4, denied), Nfs4Stat::NFS4ERR_DENIED);
+}
+
 // --- COMPOUND dispatch tests ---
 
 TEST(Nfs4Compound, MinorVersionMismatch) {

@@ -23,8 +23,12 @@ enum class Nfs4Op : uint32_t {
     OP_GETATTR             = 9,
     OP_GETFH               = 10,
     OP_LINK                = 11,
+    OP_LOCK                = 12,
+    OP_LOCKT               = 13,
+    OP_LOCKU               = 14,
     OP_LOOKUP              = 15,
     OP_LOOKUPP             = 16,
+    OP_NVERIFY             = 17,
     OP_OPEN                = 18,
     OP_OPEN_CONFIRM        = 20,
     OP_OPEN_DOWNGRADE      = 21,
@@ -43,7 +47,7 @@ enum class Nfs4Op : uint32_t {
     OP_SETCLIENTID_CONFIRM = 36,
     OP_VERIFY              = 37,
     OP_WRITE               = 38,
-    OP_NVERIFY             = 14,
+    OP_RELEASE_LOCKOWNER   = 39,
     OP_ILLEGAL             = 10044,
 };
 
@@ -88,6 +92,10 @@ enum class Nfs4Stat : uint32_t {
     NFS4ERR_RESOURCE           = 10018,
     NFS4ERR_NOFILEHANDLE       = 10020,
     NFS4ERR_SAME               = 10009,
+    NFS4ERR_DENIED             = 10010,
+    NFS4ERR_LOCK_RANGE         = 10028,
+    NFS4ERR_LOCKS_HELD         = 10037,
+    NFS4ERR_NO_GRACE           = 10033,
     NFS4ERR_OP_ILLEGAL         = 10044,
 };
 
@@ -195,6 +203,12 @@ constexpr uint32_t OPEN_DELEGATE_WRITE = 2;
 
 // RFC 7530 §16.16 - create type (for CREATE op)
 constexpr uint32_t NF4_CREATE_LNK  = 5;  // symlink
+
+// RFC 7530 §16.10 - lock types
+constexpr uint32_t READ_LT   = 1;
+constexpr uint32_t WRITE_LT  = 2;
+constexpr uint32_t READW_LT  = 3;
+constexpr uint32_t WRITEW_LT = 4;
 
 // RFC 7530 §16.32 - stable_how4
 constexpr uint32_t UNSTABLE4  = 0;

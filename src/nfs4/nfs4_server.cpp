@@ -50,6 +50,9 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_GETATTR)]             = &Nfs4Server::op_getattr;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_GETFH)]               = &Nfs4Server::op_getfh;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LINK)]                = &Nfs4Server::op_link;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOCK)]               = &Nfs4Server::op_lock;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOCKT)]              = &Nfs4Server::op_lockt;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOCKU)]              = &Nfs4Server::op_locku;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOOKUP)]              = &Nfs4Server::op_lookup;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_LOOKUPP)]             = &Nfs4Server::op_lookupp;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_OPEN)]                = &Nfs4Server::op_open;
@@ -69,7 +72,8 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETCLIENTID)]         = &Nfs4Server::op_setclientid;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETCLIENTID_CONFIRM)] = &Nfs4Server::op_setclientid_confirm;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_VERIFY)]             = &Nfs4Server::op_verify;
-    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_NVERIFY)]            = &Nfs4Server::op_nverify;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_NVERIFY)]             = &Nfs4Server::op_nverify;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RELEASE_LOCKOWNER)]  = &Nfs4Server::op_release_lockowner;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_WRITE)]               = &Nfs4Server::op_write;
 }
 
@@ -562,6 +566,132 @@ Nfs4Stat Nfs4Server::op_open_confirm(CompoundState&, XdrDecoder& args, XdrEncode
     enc.encode_uint32(out_stateid.seqid);
     enc.encode_opaque_fixed(out_stateid.other, 12);
     return Nfs4Stat::NFS4_OK;
+}
+
+// Helper: encode LOCK4denied
+static void encode_lock_denied(XdrEncoder& enc, const Nfs4LockDenied& denied) {
+    enc.encode_uint64(denied.offset);
+    enc.encode_uint64(denied.length);
+    enc.encode_uint32(denied.locktype);
+    enc.encode_uint64(denied.owner.clientid);
+    enc.encode_opaque(denied.owner.owner.data(), denied.owner.owner.size());
+}
+
+// RFC 7530 §16.10 - LOCK
+Nfs4Stat Nfs4Server::op_lock(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    uint32_t locktype = args.decode_uint32();
+    bool reclaim = args.decode_bool();
+    uint64_t offset = args.decode_uint64();
+    uint64_t length = args.decode_uint64();
+
+    // Normalize wait variants
+    if (locktype == READW_LT) locktype = READ_LT;
+    if (locktype == WRITEW_LT) locktype = WRITE_LT;
+
+    bool new_lock_owner = args.decode_bool();
+
+    if (reclaim)
+        return Nfs4Stat::NFS4ERR_NO_GRACE;
+
+    Nfs4StateId out_stateid;
+    Nfs4LockDenied denied;
+    Nfs4Stat s;
+
+    if (new_lock_owner) {
+        uint32_t open_seqid = args.decode_uint32();
+        Nfs4StateId open_stateid;
+        decode_stateid(args, open_stateid);
+        uint32_t lock_seqid = args.decode_uint32();
+        // lock_owner: clientid + owner
+        uint64_t clientid = args.decode_uint64();
+        auto owner = args.decode_opaque();
+
+        Nfs4LockOwner lo;
+        lo.clientid = clientid;
+        lo.owner = owner;
+
+        s = state_.lock_new(clientid, open_stateid, open_seqid,
+                            lo, lock_seqid, cs.current_fh,
+                            locktype, offset, length,
+                            out_stateid, denied);
+    } else {
+        Nfs4StateId lock_stateid;
+        decode_stateid(args, lock_stateid);
+        uint32_t lock_seqid = args.decode_uint32();
+
+        s = state_.lock_existing(lock_stateid, lock_seqid,
+                                 locktype, offset, length,
+                                 out_stateid, denied);
+    }
+
+    if (s == Nfs4Stat::NFS4_OK) {
+        enc.encode_uint32(out_stateid.seqid);
+        enc.encode_opaque_fixed(out_stateid.other, 12);
+    } else if (s == Nfs4Stat::NFS4ERR_DENIED) {
+        encode_lock_denied(enc, denied);
+    }
+
+    return s;
+}
+
+// RFC 7530 §16.11 - LOCKT
+Nfs4Stat Nfs4Server::op_lockt(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    uint32_t locktype = args.decode_uint32();
+    uint64_t offset = args.decode_uint64();
+    uint64_t length = args.decode_uint64();
+    uint64_t clientid = args.decode_uint64();
+    auto owner = args.decode_opaque();
+
+    if (locktype == READW_LT) locktype = READ_LT;
+    if (locktype == WRITEW_LT) locktype = WRITE_LT;
+
+    Nfs4LockOwner lo;
+    lo.clientid = clientid;
+    lo.owner = owner;
+
+    Nfs4LockDenied denied;
+    Nfs4Stat s = state_.lock_test(cs.current_fh, locktype, offset, length, lo, denied);
+
+    if (s == Nfs4Stat::NFS4ERR_DENIED) {
+        encode_lock_denied(enc, denied);
+    }
+
+    return s;
+}
+
+// RFC 7530 §16.12 - LOCKU
+Nfs4Stat Nfs4Server::op_locku(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    uint32_t locktype = args.decode_uint32();
+    (void)locktype;  // locktype not used for unlock
+    uint32_t seqid = args.decode_uint32();
+    Nfs4StateId lock_stateid;
+    decode_stateid(args, lock_stateid);
+    uint64_t offset = args.decode_uint64();
+    uint64_t length = args.decode_uint64();
+
+    Nfs4StateId out_stateid;
+    Nfs4Stat s = state_.lock_unlock(lock_stateid, seqid, offset, length, out_stateid);
+    if (s != Nfs4Stat::NFS4_OK) return s;
+
+    enc.encode_uint32(out_stateid.seqid);
+    enc.encode_opaque_fixed(out_stateid.other, 12);
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.26 - RELEASE_LOCKOWNER
+Nfs4Stat Nfs4Server::op_release_lockowner(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    uint64_t clientid = args.decode_uint64();
+    auto owner = args.decode_opaque();
+
+    Nfs4LockOwner lo;
+    lo.clientid = clientid;
+    lo.owner = owner;
+
+    return state_.release_lock_owner(lo);
 }
 
 // RFC 7530 §16.19 - OPEN_DOWNGRADE

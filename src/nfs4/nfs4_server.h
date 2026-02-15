@@ -46,6 +46,9 @@ private:
     Nfs4Stat op_getattr(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_getfh(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_link(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_lock(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_lockt(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_locku(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_lookup(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_lookupp(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
@@ -66,6 +69,7 @@ private:
     Nfs4Stat op_setclientid_confirm(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_verify(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_nverify(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_release_lockowner(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_write(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
 
     // Helpers

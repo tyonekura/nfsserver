@@ -40,6 +40,12 @@ void Nfs4StateManager::expire_clients() {
     }
 
     for (uint64_t cid : expired) {
+        // Remove all lock state for this client
+        lock_states_.erase(
+            std::remove_if(lock_states_.begin(), lock_states_.end(),
+                [cid](const Nfs4LockState& ls) { return ls.clientid == cid; }),
+            lock_states_.end());
+
         // Remove all open state for this client
         open_states_.erase(
             std::remove_if(open_states_.begin(), open_states_.end(),
@@ -247,9 +253,25 @@ Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
     if (seqid != it->open_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
+    // RFC 7530 §9.1.4.4 - Check for held locks
+    for (const auto& ls : lock_states_) {
+        if (std::memcmp(ls.open_stateid_other, it->stateid.other, 12) == 0 &&
+            !ls.ranges.empty()) {
+            return Nfs4Stat::NFS4ERR_LOCKS_HELD;
+        }
+    }
+
     // Return a final stateid with seqid=UINT32_MAX to indicate closed
     out_stateid = it->stateid;
     out_stateid.seqid = UINT32_MAX;
+
+    // Remove lock states associated with this open (empty ones)
+    lock_states_.erase(
+        std::remove_if(lock_states_.begin(), lock_states_.end(),
+            [&](const Nfs4LockState& ls) {
+                return std::memcmp(ls.open_stateid_other, it->stateid.other, 12) == 0;
+            }),
+        lock_states_.end());
 
     // Renew lease
     auto cit = clients_.find(it->clientid);
@@ -311,11 +333,242 @@ Nfs4Stat Nfs4StateManager::validate_stateid(const Nfs4StateId& stateid,
     std::lock_guard<std::mutex> lk(mu_);
 
     auto* os = find_open_state(stateid);
+    if (os) {
+        // Check that the open has the required access
+        if ((required_access & os->access) != required_access)
+            return Nfs4Stat::NFS4ERR_ACCESS;
+        return Nfs4Stat::NFS4_OK;
+    }
+
+    // Also check lock stateids (RFC 7530 §9.1.3)
+    auto* ls = find_lock_state(stateid);
+    if (ls) return Nfs4Stat::NFS4_OK;
+
+    return Nfs4Stat::NFS4ERR_BAD_STATEID;
+}
+
+// --- Byte-range locking ---
+
+Nfs4LockState* Nfs4StateManager::find_lock_state(const Nfs4StateId& sid) {
+    for (auto& ls : lock_states_) {
+        if (std::memcmp(ls.stateid.other, sid.other, 12) == 0)
+            return &ls;
+    }
+    return nullptr;
+}
+
+Nfs4LockState* Nfs4StateManager::find_lock_state_by_owner(
+        const Nfs4LockOwner& owner, const FileHandle& fh) {
+    for (auto& ls : lock_states_) {
+        if (ls.lock_owner == owner && ls.fh == fh)
+            return &ls;
+    }
+    return nullptr;
+}
+
+static bool ranges_overlap(uint64_t o1, uint64_t l1, uint64_t o2, uint64_t l2) {
+    uint64_t end1 = (l1 == UINT64_MAX) ? UINT64_MAX : o1 + l1;
+    uint64_t end2 = (l2 == UINT64_MAX) ? UINT64_MAX : o2 + l2;
+    return o1 < end2 && o2 < end1;
+}
+
+bool Nfs4StateManager::check_lock_conflict(const FileHandle& fh,
+                                            const Nfs4LockOwner& requester,
+                                            uint32_t locktype,
+                                            uint64_t offset, uint64_t length,
+                                            Nfs4LockDenied& denied) {
+    for (const auto& ls : lock_states_) {
+        if (!(ls.fh == fh)) continue;
+        if (ls.lock_owner == requester) continue;  // same owner never conflicts
+        for (const auto& r : ls.ranges) {
+            // READ-READ is compatible; anything with WRITE conflicts
+            if (locktype == READ_LT && r.locktype == READ_LT) continue;
+            if (ranges_overlap(offset, length, r.offset, r.length)) {
+                denied.offset = r.offset;
+                denied.length = r.length;
+                denied.locktype = r.locktype;
+                denied.owner = ls.lock_owner;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void Nfs4StateManager::remove_lock_range(Nfs4LockState& ls,
+                                          uint64_t offset, uint64_t length) {
+    uint64_t rem_end = (length == UINT64_MAX) ? UINT64_MAX : offset + length;
+    std::vector<Nfs4LockRange> new_ranges;
+
+    for (const auto& r : ls.ranges) {
+        uint64_t r_end = (r.length == UINT64_MAX) ? UINT64_MAX : r.offset + r.length;
+
+        if (!ranges_overlap(offset, length, r.offset, r.length)) {
+            // No overlap — keep as-is
+            new_ranges.push_back(r);
+            continue;
+        }
+
+        // Left remnant: range starts before removal window
+        if (r.offset < offset) {
+            Nfs4LockRange left = r;
+            left.length = offset - r.offset;
+            new_ranges.push_back(left);
+        }
+
+        // Right remnant: range extends past removal window
+        if (r_end > rem_end && rem_end != UINT64_MAX) {
+            Nfs4LockRange right = r;
+            right.offset = rem_end;
+            right.length = (r.length == UINT64_MAX) ? UINT64_MAX : r_end - rem_end;
+            new_ranges.push_back(right);
+        }
+    }
+
+    ls.ranges = std::move(new_ranges);
+}
+
+// RFC 7530 §16.10 - LOCK (new lock_owner)
+Nfs4Stat Nfs4StateManager::lock_new(uint64_t clientid,
+                                      const Nfs4StateId& open_stateid,
+                                      uint32_t open_seqid,
+                                      const Nfs4LockOwner& lock_owner,
+                                      uint32_t lock_seqid,
+                                      const FileHandle& fh,
+                                      uint32_t locktype,
+                                      uint64_t offset, uint64_t length,
+                                      Nfs4StateId& out_stateid,
+                                      Nfs4LockDenied& denied) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    // Find and validate open state
+    auto* os = find_open_state(open_stateid);
     if (!os) return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
-    // Check that the open has the required access
-    if ((required_access & os->access) != required_access)
-        return Nfs4Stat::NFS4ERR_ACCESS;
+    // Validate open_seqid
+    if (open_seqid != os->open_seqid + 1)
+        return Nfs4Stat::NFS4ERR_BAD_SEQID;
+
+    // Bump the open seqid (consumed even on LOCK failure per RFC 7530 §8.1.5)
+    os->open_seqid = open_seqid;
+    os->stateid.seqid++;
+
+    // Check for conflicts
+    if (check_lock_conflict(fh, lock_owner, locktype, offset, length, denied))
+        return Nfs4Stat::NFS4ERR_DENIED;
+
+    // Find or create lock state for this owner+fh
+    auto* ls = find_lock_state_by_owner(lock_owner, fh);
+    if (!ls) {
+        Nfs4LockState new_ls;
+        new_ls.stateid.seqid = 1;
+        gen_stateid_other(new_ls.stateid.other);
+        new_ls.lock_owner = lock_owner;
+        new_ls.fh = fh;
+        new_ls.clientid = clientid;
+        std::memcpy(new_ls.open_stateid_other, os->stateid.other, 12);
+        new_ls.lock_seqid = lock_seqid;
+        new_ls.ranges.push_back({offset, length, locktype});
+        out_stateid = new_ls.stateid;
+        lock_states_.push_back(std::move(new_ls));
+    } else {
+        // Existing lock state for this owner+fh
+        if (lock_seqid != ls->lock_seqid + 1 && lock_seqid != 0)
+            return Nfs4Stat::NFS4ERR_BAD_SEQID;
+        ls->ranges.push_back({offset, length, locktype});
+        ls->lock_seqid = lock_seqid;
+        ls->stateid.seqid++;
+        out_stateid = ls->stateid;
+    }
+
+    // Renew lease
+    auto cit = clients_.find(clientid);
+    if (cit != clients_.end())
+        cit->second.last_renewed = std::chrono::steady_clock::now();
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.10 - LOCK (existing lock_stateid)
+Nfs4Stat Nfs4StateManager::lock_existing(const Nfs4StateId& lock_stateid,
+                                           uint32_t lock_seqid,
+                                           uint32_t locktype,
+                                           uint64_t offset, uint64_t length,
+                                           Nfs4StateId& out_stateid,
+                                           Nfs4LockDenied& denied) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto* ls = find_lock_state(lock_stateid);
+    if (!ls) return Nfs4Stat::NFS4ERR_BAD_STATEID;
+
+    if (lock_seqid != ls->lock_seqid + 1)
+        return Nfs4Stat::NFS4ERR_BAD_SEQID;
+
+    // Check for conflicts
+    if (check_lock_conflict(ls->fh, ls->lock_owner, locktype, offset, length, denied))
+        return Nfs4Stat::NFS4ERR_DENIED;
+
+    ls->ranges.push_back({offset, length, locktype});
+    ls->lock_seqid = lock_seqid;
+    ls->stateid.seqid++;
+    out_stateid = ls->stateid;
+
+    // Renew lease
+    auto cit = clients_.find(ls->clientid);
+    if (cit != clients_.end())
+        cit->second.last_renewed = std::chrono::steady_clock::now();
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.11 - LOCKT
+Nfs4Stat Nfs4StateManager::lock_test(const FileHandle& fh,
+                                       uint32_t locktype,
+                                       uint64_t offset, uint64_t length,
+                                       const Nfs4LockOwner& lock_owner,
+                                       Nfs4LockDenied& denied) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    if (check_lock_conflict(fh, lock_owner, locktype, offset, length, denied))
+        return Nfs4Stat::NFS4ERR_DENIED;
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.12 - LOCKU
+Nfs4Stat Nfs4StateManager::lock_unlock(const Nfs4StateId& lock_stateid,
+                                         uint32_t seqid,
+                                         uint64_t offset, uint64_t length,
+                                         Nfs4StateId& out_stateid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto* ls = find_lock_state(lock_stateid);
+    if (!ls) return Nfs4Stat::NFS4ERR_BAD_STATEID;
+
+    if (seqid != ls->lock_seqid + 1)
+        return Nfs4Stat::NFS4ERR_BAD_SEQID;
+
+    remove_lock_range(*ls, offset, length);
+    ls->lock_seqid = seqid;
+    ls->stateid.seqid++;
+    out_stateid = ls->stateid;
+
+    // Renew lease
+    auto cit = clients_.find(ls->clientid);
+    if (cit != clients_.end())
+        cit->second.last_renewed = std::chrono::steady_clock::now();
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.26 - RELEASE_LOCKOWNER
+Nfs4Stat Nfs4StateManager::release_lock_owner(const Nfs4LockOwner& lock_owner) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    lock_states_.erase(
+        std::remove_if(lock_states_.begin(), lock_states_.end(),
+            [&](const Nfs4LockState& ls) { return ls.lock_owner == lock_owner; }),
+        lock_states_.end());
 
     return Nfs4Stat::NFS4_OK;
 }

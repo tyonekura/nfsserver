@@ -22,6 +22,41 @@ struct Nfs4Client {
     std::chrono::steady_clock::time_point last_renewed;
 };
 
+// RFC 7530 §16.10 - Lock owner identity
+struct Nfs4LockOwner {
+    uint64_t clientid = 0;
+    std::vector<uint8_t> owner;
+    bool operator==(const Nfs4LockOwner& o) const {
+        return clientid == o.clientid && owner == o.owner;
+    }
+};
+
+// RFC 7530 §16.10 - Byte-range lock
+struct Nfs4LockRange {
+    uint64_t offset = 0;
+    uint64_t length = 0;       // UINT64_MAX = to EOF
+    uint32_t locktype = 0;     // READ_LT or WRITE_LT
+};
+
+// RFC 7530 §16.10 - LOCK4denied response
+struct Nfs4LockDenied {
+    uint64_t offset = 0;
+    uint64_t length = 0;
+    uint32_t locktype = 0;
+    Nfs4LockOwner owner;
+};
+
+// All lock state for one lock_owner on one file
+struct Nfs4LockState {
+    Nfs4StateId stateid;
+    Nfs4LockOwner lock_owner;
+    FileHandle fh;
+    uint64_t clientid = 0;
+    uint8_t open_stateid_other[12] = {};  // backlink for cleanup on CLOSE
+    uint32_t lock_seqid = 0;
+    std::vector<Nfs4LockRange> ranges;
+};
+
 struct Nfs4OpenState {
     Nfs4StateId stateid;
     uint64_t clientid = 0;
@@ -79,9 +114,53 @@ public:
     // Check if stateid is a special (anonymous or bypass) stateid
     static bool is_special_stateid(const Nfs4StateId& sid);
 
+    // RFC 7530 §16.10 - LOCK (new lock_owner)
+    Nfs4Stat lock_new(uint64_t clientid,
+                      const Nfs4StateId& open_stateid,
+                      uint32_t open_seqid,
+                      const Nfs4LockOwner& lock_owner,
+                      uint32_t lock_seqid,
+                      const FileHandle& fh,
+                      uint32_t locktype,
+                      uint64_t offset, uint64_t length,
+                      Nfs4StateId& out_stateid,
+                      Nfs4LockDenied& denied);
+
+    // RFC 7530 §16.10 - LOCK (existing lock_stateid)
+    Nfs4Stat lock_existing(const Nfs4StateId& lock_stateid,
+                           uint32_t lock_seqid,
+                           uint32_t locktype,
+                           uint64_t offset, uint64_t length,
+                           Nfs4StateId& out_stateid,
+                           Nfs4LockDenied& denied);
+
+    // RFC 7530 §16.11 - LOCKT
+    Nfs4Stat lock_test(const FileHandle& fh,
+                       uint32_t locktype,
+                       uint64_t offset, uint64_t length,
+                       const Nfs4LockOwner& lock_owner,
+                       Nfs4LockDenied& denied);
+
+    // RFC 7530 §16.12 - LOCKU
+    Nfs4Stat lock_unlock(const Nfs4StateId& lock_stateid,
+                         uint32_t seqid,
+                         uint64_t offset, uint64_t length,
+                         Nfs4StateId& out_stateid);
+
+    // RFC 7530 §16.26 - RELEASE_LOCKOWNER
+    Nfs4Stat release_lock_owner(const Nfs4LockOwner& lock_owner);
+
 private:
     // Lookup open state by stateid.other bytes
     Nfs4OpenState* find_open_state(const Nfs4StateId& sid);
+
+    // Lookup lock state by stateid.other bytes
+    Nfs4LockState* find_lock_state(const Nfs4StateId& sid);
+    Nfs4LockState* find_lock_state_by_owner(const Nfs4LockOwner& owner, const FileHandle& fh);
+    bool check_lock_conflict(const FileHandle& fh, const Nfs4LockOwner& requester,
+                             uint32_t locktype, uint64_t offset, uint64_t length,
+                             Nfs4LockDenied& denied);
+    void remove_lock_range(Nfs4LockState& ls, uint64_t offset, uint64_t length);
 
     // Generate a unique stateid.other
     void gen_stateid_other(uint8_t out[12]);
@@ -96,6 +175,7 @@ private:
     std::map<uint64_t, Nfs4Client> clients_;                       // clientid -> client
     std::map<std::vector<uint8_t>, uint64_t> client_id_to_clientid_; // nfs_client_id4 -> clientid
     std::vector<Nfs4OpenState> open_states_;
+    std::vector<Nfs4LockState> lock_states_;
 
     std::atomic<bool> reaper_running_{true};
     std::thread reaper_thread_;
