@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     cmake \
     git \
     nfs-common \
+    rpcbind \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

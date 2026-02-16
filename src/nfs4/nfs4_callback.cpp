@@ -145,11 +145,13 @@ bool cb_null_probe(const Nfs4CallbackInfo& cb, uint32_t xid) {
 
     if (!ok || reply.size() < 24) return false;
 
-    // Verify: xid match, REPLY(1), MSG_ACCEPTED(0), accept_stat SUCCESS(0)
+    // RPC reply: xid, REPLY(1), reply_stat(0=ACCEPTED), verifier, accept_stat
     XdrDecoder dec(reply.data(), reply.size());
     uint32_t reply_xid = dec.decode_uint32();
     uint32_t msg_type = dec.decode_uint32();
     if (reply_xid != xid || msg_type != 1) return false;
+    uint32_t reply_stat = dec.decode_uint32();
+    if (reply_stat != 0) return false;  // MSG_ACCEPTED
 
     // Skip verifier (flavor + opaque)
     dec.decode_uint32();  // verf flavor
@@ -196,11 +198,13 @@ bool cb_recall(const Nfs4CallbackInfo& cb,
 
     if (!ok || reply.size() < 24) return false;
 
-    // Verify reply
+    // RPC reply: xid, REPLY(1), reply_stat(0=ACCEPTED), verifier, accept_stat
     XdrDecoder dec(reply.data(), reply.size());
     uint32_t reply_xid = dec.decode_uint32();
     uint32_t msg_type = dec.decode_uint32();
     if (reply_xid != xid || msg_type != 1) return false;
+    uint32_t reply_stat = dec.decode_uint32();
+    if (reply_stat != 0) return false;  // MSG_ACCEPTED
 
     // Skip verifier
     dec.decode_uint32();

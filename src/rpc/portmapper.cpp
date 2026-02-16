@@ -8,8 +8,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <iostream>
+#include <thread>
 #include <vector>
 
 // Connect to local portmapper (127.0.0.1:111) with timeout
@@ -116,11 +118,13 @@ static bool pmap_call(uint32_t procedure, uint32_t program,
 
     if (!ok || reply.size() < 28) return false;
 
-    // Verify reply: xid match, REPLY(1), MSG_ACCEPTED(0), SUCCESS(0)
+    // RPC reply: xid, REPLY(1), reply_stat(0=ACCEPTED), verifier, accept_stat, result
     XdrDecoder dec(reply.data(), reply.size());
-    dec.decode_uint32();  // xid (skip)
+    dec.decode_uint32();  // xid
     uint32_t msg_type = dec.decode_uint32();
     if (msg_type != 1) return false;
+    uint32_t reply_stat = dec.decode_uint32();
+    if (reply_stat != 0) return false;  // MSG_ACCEPTED
 
     // Skip verifier
     dec.decode_uint32();  // verf flavor
@@ -148,14 +152,29 @@ void pmap_register_all(uint16_t port) {
         {MOUNT_PROGRAM, MOUNT_V3,  "MOUNT v3"},
     };
 
-    for (const auto& e : entries) {
-        if (pmap_register(e.prog, e.ver, port)) {
-            std::cout << "  Registered " << e.name << " with portmapper\n";
-        } else {
-            std::cerr << "  Warning: failed to register " << e.name
-                      << " with portmapper (rpcbind may not be running)\n";
+    // Retry a few times in case rpcbind is still starting
+    bool registered = false;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (pmap_register(entries[0].prog, entries[0].ver, port)) {
+            registered = true;
+            break;
         }
+        std::cerr << "  Portmapper not ready, retrying in 1s...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+
+    if (!registered) {
+        std::cerr << "  Warning: could not register with portmapper"
+                  << " (rpcbind may not be running)\n";
+        return;
+    }
+
+    // First succeeded — register the rest
+    for (size_t i = 1; i < sizeof(entries)/sizeof(entries[0]); i++)
+        pmap_register(entries[i].prog, entries[i].ver, port);
+
+    for (const auto& e : entries)
+        std::cout << "  Registered " << e.name << " with portmapper\n";
 }
 
 void pmap_unregister_all() {
