@@ -20,6 +20,8 @@ enum class Nfs4Op : uint32_t {
     OP_CLOSE               = 4,
     OP_COMMIT              = 5,
     OP_CREATE              = 6,
+    OP_DELEGPURGE          = 7,
+    OP_DELEGRETURN         = 8,
     OP_GETATTR             = 9,
     OP_GETFH               = 10,
     OP_LINK                = 11,
@@ -95,6 +97,7 @@ enum class Nfs4Stat : uint32_t {
     NFS4ERR_DENIED             = 10010,
     NFS4ERR_LOCK_RANGE         = 10028,
     NFS4ERR_LOCKS_HELD         = 10037,
+    NFS4ERR_DELAY              = 10008,
     NFS4ERR_NO_GRACE           = 10033,
     NFS4ERR_OP_ILLEGAL         = 10044,
 };
@@ -217,6 +220,15 @@ constexpr uint32_t FILE_SYNC4 = 2;
 
 // FH expire type
 constexpr uint32_t FH4_PERSISTENT = 0;
+
+// RFC 7530 §15.3 - Callback program
+constexpr uint32_t NFS4_CALLBACK = 0x40000000;
+constexpr uint32_t CB_NULL = 0;
+constexpr uint32_t CB_COMPOUND = 1;
+constexpr uint32_t OP_CB_RECALL = 4;
+
+// RFC 7530 §16.16 - write delegation space limit
+constexpr uint32_t NFS_LIMIT_SIZE = 1;
 
 // Lease time in seconds
 constexpr uint32_t NFS4_LEASE_TIME = 90;

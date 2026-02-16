@@ -5,9 +5,9 @@
 | # | Item | Status |
 |---|------|--------|
 | 16 | Byte-range locking (LOCK/LOCKT/LOCKU/RELEASE_LOCKOWNER) | Done |
-| 17 | Read delegations | Pending |
-| 18 | Write delegations | Pending |
-| 19 | Callback channel | Pending |
+| 17 | Read delegations | Done |
+| 18 | Write delegations | Done |
+| 19 | Callback channel | Done |
 | 20 | Grace period / CLAIM_PREVIOUS | Pending |
 | 21 | OP_SECINFO | Pending |
 | 22 | ACL support | Pending |

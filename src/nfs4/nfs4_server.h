@@ -4,6 +4,7 @@
 #include "vfs/vfs.h"
 #include "nfs4/nfs4_types.h"
 #include "nfs4/nfs4_state.h"
+#include <atomic>
 #include <map>
 #include <string>
 
@@ -71,6 +72,8 @@ private:
     Nfs4Stat op_nverify(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_release_lockowner(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_write(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_delegreturn(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_delegpurge(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
 
     // Helpers
     Nfs4Stat verify_common(CompoundState& cs, XdrDecoder& args, bool negate);
@@ -83,4 +86,5 @@ private:
     Nfs4StateManager state_;
     std::map<uint32_t, OpHandler> op_handlers_;
     uint64_t write_verifier_ = 0;
+    std::atomic<uint32_t> next_cb_xid_{1};
 };

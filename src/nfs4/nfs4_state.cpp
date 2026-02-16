@@ -40,6 +40,12 @@ void Nfs4StateManager::expire_clients() {
     }
 
     for (uint64_t cid : expired) {
+        // Remove all delegation state for this client
+        deleg_states_.erase(
+            std::remove_if(deleg_states_.begin(), deleg_states_.end(),
+                [cid](const Nfs4DelegState& ds) { return ds.clientid == cid; }),
+            deleg_states_.end());
+
         // Remove all lock state for this client
         lock_states_.erase(
             std::remove_if(lock_states_.begin(), lock_states_.end(),
@@ -94,7 +100,8 @@ Nfs4OpenState* Nfs4StateManager::find_open_state(const Nfs4StateId& sid) {
 // RFC 7530 §16.33 - SETCLIENTID
 std::pair<uint64_t, std::array<uint8_t, 8>>
 Nfs4StateManager::set_clientid(const uint8_t verifier[8],
-                                const std::vector<uint8_t>& client_id) {
+                                const std::vector<uint8_t>& client_id,
+                                const Nfs4CallbackInfo& cb) {
     std::lock_guard<std::mutex> lk(mu_);
 
     // Check if this client_id already exists
@@ -104,6 +111,7 @@ Nfs4StateManager::set_clientid(const uint8_t verifier[8],
         // Update verifier, generate new confirm verifier
         std::memcpy(client.verifier, verifier, 8);
         client.confirmed = false;
+        client.cb_info = cb;
 
         // Generate new confirm verifier
         std::random_device rd;
@@ -124,6 +132,7 @@ Nfs4StateManager::set_clientid(const uint8_t verifier[8],
     std::memcpy(c.verifier, verifier, 8);
     c.client_id = client_id;
     c.confirmed = false;
+    c.cb_info = cb;
     c.last_renewed = std::chrono::steady_clock::now();
 
     // Generate confirm verifier
@@ -165,12 +174,38 @@ Nfs4Stat Nfs4StateManager::open_file(uint64_t clientid,
                                       const FileHandle& fh,
                                       uint32_t access, uint32_t deny,
                                       Nfs4StateId& out_stateid,
-                                      bool& needs_confirm) {
+                                      bool& needs_confirm,
+                                      uint32_t& out_deleg_type,
+                                      Nfs4StateId& out_deleg_stateid,
+                                      Nfs4CallbackInfo& out_recall_cb,
+                                      Nfs4StateId& out_recall_deleg_sid,
+                                      FileHandle& out_recall_fh) {
     std::lock_guard<std::mutex> lk(mu_);
+
+    out_deleg_type = OPEN_DELEGATE_NONE;
 
     auto cit = clients_.find(clientid);
     if (cit == clients_.end() || !cit->second.confirmed)
         return Nfs4Stat::NFS4ERR_STALE_CLIENTID;
+
+    // RFC 7530 §10.4 - Check for conflicting delegations from other clients
+    for (auto& ds : deleg_states_) {
+        if (!(ds.fh == fh) || ds.clientid == clientid) continue;
+        // Write delegation always conflicts; read deleg conflicts with write access
+        bool conflicts = (ds.deleg_type == OPEN_DELEGATE_WRITE) ||
+                         (access & OPEN4_SHARE_ACCESS_WRITE);
+        if (!conflicts) continue;
+
+        if (!ds.recalled) {
+            ds.recalled = true;
+            auto dit = clients_.find(ds.clientid);
+            if (dit != clients_.end())
+                out_recall_cb = dit->second.cb_info;
+            out_recall_deleg_sid = ds.stateid;
+            out_recall_fh = ds.fh;
+        }
+        return Nfs4Stat::NFS4ERR_DELAY;
+    }
 
     // Check if there's an existing open for same owner+fh
     for (auto& os : open_states_) {
@@ -204,6 +239,40 @@ Nfs4Stat Nfs4StateManager::open_file(uint64_t clientid,
     out_stateid = os.stateid;
     needs_confirm = true;
     open_states_.push_back(std::move(os));
+
+    // RFC 7530 §10.4 - Try to grant delegation
+    // Only if no other client has the file open and client has valid callback
+    bool other_client_open = false;
+    for (const auto& oos : open_states_) {
+        if (oos.fh == fh && oos.clientid != clientid) {
+            other_client_open = true;
+            break;
+        }
+    }
+    if (!other_client_open && cit->second.cb_info.valid) {
+        // Check if client already has delegation on this file
+        for (const auto& ds : deleg_states_) {
+            if (ds.fh == fh && ds.clientid == clientid) {
+                out_deleg_type = ds.deleg_type;
+                out_deleg_stateid = ds.stateid;
+                goto deleg_done;
+            }
+        }
+        // Grant new delegation
+        {
+            Nfs4DelegState ds;
+            ds.stateid.seqid = 1;
+            gen_stateid_other(ds.stateid.other);
+            ds.clientid = clientid;
+            ds.fh = fh;
+            ds.deleg_type = (access & OPEN4_SHARE_ACCESS_WRITE)
+                            ? OPEN_DELEGATE_WRITE : OPEN_DELEGATE_READ;
+            out_deleg_type = ds.deleg_type;
+            out_deleg_stateid = ds.stateid;
+            deleg_states_.push_back(std::move(ds));
+        }
+    }
+deleg_done:
 
     cit->second.last_renewed = std::chrono::steady_clock::now();
     return Nfs4Stat::NFS4_OK;
@@ -343,6 +412,15 @@ Nfs4Stat Nfs4StateManager::validate_stateid(const Nfs4StateId& stateid,
     // Also check lock stateids (RFC 7530 §9.1.3)
     auto* ls = find_lock_state(stateid);
     if (ls) return Nfs4Stat::NFS4_OK;
+
+    // Also check delegation stateids (RFC 7530 §10.4)
+    auto* ds = find_deleg_state(stateid);
+    if (ds) {
+        if (ds->deleg_type == OPEN_DELEGATE_READ &&
+            (required_access & OPEN4_SHARE_ACCESS_WRITE))
+            return Nfs4Stat::NFS4ERR_ACCESS;
+        return Nfs4Stat::NFS4_OK;
+    }
 
     return Nfs4Stat::NFS4ERR_BAD_STATEID;
 }
@@ -571,4 +649,53 @@ Nfs4Stat Nfs4StateManager::release_lock_owner(const Nfs4LockOwner& lock_owner) {
         lock_states_.end());
 
     return Nfs4Stat::NFS4_OK;
+}
+
+// --- Delegation support ---
+
+Nfs4DelegState* Nfs4StateManager::find_deleg_state(const Nfs4StateId& sid) {
+    for (auto& ds : deleg_states_) {
+        if (std::memcmp(ds.stateid.other, sid.other, 12) == 0)
+            return &ds;
+    }
+    return nullptr;
+}
+
+Nfs4Stat Nfs4StateManager::delegreturn(const Nfs4StateId& stateid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto it = std::find_if(deleg_states_.begin(), deleg_states_.end(),
+        [&](const Nfs4DelegState& ds) {
+            return std::memcmp(ds.stateid.other, stateid.other, 12) == 0;
+        });
+    if (it == deleg_states_.end())
+        return Nfs4Stat::NFS4ERR_BAD_STATEID;
+
+    deleg_states_.erase(it);
+    return Nfs4Stat::NFS4_OK;
+}
+
+Nfs4Stat Nfs4StateManager::delegpurge(uint64_t clientid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    deleg_states_.erase(
+        std::remove_if(deleg_states_.begin(), deleg_states_.end(),
+            [clientid](const Nfs4DelegState& ds) { return ds.clientid == clientid; }),
+        deleg_states_.end());
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+Nfs4CallbackInfo Nfs4StateManager::get_client_callback(uint64_t clientid) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = clients_.find(clientid);
+    if (it == clients_.end()) return {};
+    return it->second.cb_info;
+}
+
+void Nfs4StateManager::invalidate_client_callback(uint64_t clientid) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = clients_.find(clientid);
+    if (it != clients_.end())
+        it->second.cb_info.valid = false;
 }

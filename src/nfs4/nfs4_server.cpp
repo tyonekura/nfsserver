@@ -1,8 +1,10 @@
 #include "nfs4/nfs4_server.h"
 #include "nfs4/nfs4_attrs.h"
+#include "nfs4/nfs4_callback.h"
 #include "nfs4/nfs4_types.h"
 #include <chrono>
 #include <cstring>
+#include <iostream>
 
 // RFC 7530 §14.1 - UTF-8 string validation
 static bool is_valid_utf8(const std::string& s) {
@@ -75,6 +77,8 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_NVERIFY)]             = &Nfs4Server::op_nverify;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RELEASE_LOCKOWNER)]  = &Nfs4Server::op_release_lockowner;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_WRITE)]               = &Nfs4Server::op_write;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_DELEGRETURN)]         = &Nfs4Server::op_delegreturn;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_DELEGPURGE)]          = &Nfs4Server::op_delegpurge;
 }
 
 RpcProgramHandlers Nfs4Server::get_handlers() {
@@ -390,15 +394,15 @@ Nfs4Stat Nfs4Server::op_setclientid(CompoundState&, XdrDecoder& args, XdrEncoder
     args.decode_opaque_fixed(verifier, 8);
     auto client_id_opaque = args.decode_opaque();
 
-    // callback: cb_program (uint32) + cb_location (string + string)
-    args.decode_uint32(); // cb_program
-    args.decode_string(); // r_netid
-    args.decode_string(); // r_addr
+    // callback: cb_program (uint32) + cb_location (r_netid + r_addr)
+    Nfs4CallbackInfo cb;
+    cb.cb_program = args.decode_uint32();
+    cb.r_netid = args.decode_string();
+    cb.r_addr = args.decode_string();
+    cb.callback_ident = args.decode_uint32();
+    cb.valid = !cb.r_addr.empty() && !cb.r_netid.empty();
 
-    // callback_ident
-    args.decode_uint32();
-
-    auto [clientid, confirm] = state_.set_clientid(verifier, client_id_opaque);
+    auto [clientid, confirm] = state_.set_clientid(verifier, client_id_opaque, cb);
 
     enc.encode_uint64(clientid);
     enc.encode_opaque_fixed(confirm.data(), 8);
@@ -411,7 +415,20 @@ Nfs4Stat Nfs4Server::op_setclientid_confirm(CompoundState&, XdrDecoder& args, Xd
     uint8_t confirm[8];
     args.decode_opaque_fixed(confirm, 8);
 
-    return state_.confirm_clientid(clientid, confirm);
+    Nfs4Stat s = state_.confirm_clientid(clientid, confirm);
+    if (s != Nfs4Stat::NFS4_OK) return s;
+
+    // RFC 7530 §16.34 - Probe callback path
+    Nfs4CallbackInfo cb = state_.get_client_callback(clientid);
+    if (cb.valid) {
+        bool ok = cb_null_probe(cb, next_cb_xid_++);
+        if (!ok) {
+            std::cerr << "CB_NULL probe failed for client " << clientid
+                      << " at " << cb.r_addr << " — delegations disabled\n";
+            state_.invalidate_client_callback(clientid);
+        }
+    }
+    return Nfs4Stat::NFS4_OK;
 }
 
 // RFC 7530 §16.27 - RENEW
@@ -453,11 +470,25 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     // open_claim4
     uint32_t claim_type = args.decode_uint32();
     std::string name;
+    Nfs4StateId deleg_cur_stateid;
     if (claim_type == CLAIM_NULL) {
         name = args.decode_string();
         if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
+    } else if (claim_type == CLAIM_PREVIOUS) {
+        args.decode_uint32(); // delegate_type
+        return Nfs4Stat::NFS4ERR_NO_GRACE;
+    } else if (claim_type == CLAIM_DELEGATE_CUR) {
+        decode_stateid(args, deleg_cur_stateid);
+        name = args.decode_string();
+        if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
+        // Validate the delegation stateid
+        Nfs4Stat vs = state_.validate_stateid(deleg_cur_stateid, share_access);
+        if (vs != Nfs4Stat::NFS4_OK) return vs;
+    } else if (claim_type == CLAIM_DELEGATE_PREV) {
+        name = args.decode_string();
+        if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
+        return Nfs4Stat::NFS4ERR_NO_GRACE;
     } else {
-        // Other claim types not supported
         return Nfs4Stat::NFS4ERR_NOTSUPP;
     }
 
@@ -510,12 +541,27 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         if (lookup_s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(lookup_s);
     }
 
-    // Create open state
+    // Create open state (with delegation support)
     Nfs4StateId stateid;
     bool needs_confirm = false;
+    uint32_t deleg_type = OPEN_DELEGATE_NONE;
+    Nfs4StateId deleg_stateid;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_deleg_sid;
+    FileHandle recall_fh;
+
     Nfs4Stat s = state_.open_file(clientid, owner, seqid, file_fh,
                                    share_access, share_deny,
-                                   stateid, needs_confirm);
+                                   stateid, needs_confirm,
+                                   deleg_type, deleg_stateid,
+                                   recall_cb, recall_deleg_sid, recall_fh);
+
+    if (s == Nfs4Stat::NFS4ERR_DELAY) {
+        // Delegation conflict — send CB_RECALL and tell client to retry
+        if (recall_cb.valid)
+            cb_recall(recall_cb, next_cb_xid_++, recall_deleg_sid, false, recall_fh);
+        return Nfs4Stat::NFS4ERR_DELAY;
+    }
     if (s != Nfs4Stat::NFS4_OK) return s;
 
     // Update current FH to the opened file
@@ -546,8 +592,32 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     std::vector<uint32_t> attrset;
     encode_bitmap(enc, attrset);
 
-    // delegation: OPEN_DELEGATE_NONE
-    enc.encode_uint32(OPEN_DELEGATE_NONE);
+    // delegation
+    enc.encode_uint32(deleg_type);
+    if (deleg_type == OPEN_DELEGATE_READ) {
+        // open_read_delegation4: stateid, recall, nfsace4
+        enc.encode_uint32(deleg_stateid.seqid);
+        enc.encode_opaque_fixed(deleg_stateid.other, 12);
+        enc.encode_bool(false);  // recall = false
+        // nfsace4: type=ALLOW(0), flag=0, access_mask=READ_DATA(1), who=""
+        enc.encode_uint32(0);          // ACE4_ACCESS_ALLOWED_ACE_TYPE
+        enc.encode_uint32(0);          // aceflag
+        enc.encode_uint32(0x00000001); // ACE4_READ_DATA
+        enc.encode_string("");         // who
+    } else if (deleg_type == OPEN_DELEGATE_WRITE) {
+        // open_write_delegation4: stateid, recall, space_limit, nfsace4
+        enc.encode_uint32(deleg_stateid.seqid);
+        enc.encode_opaque_fixed(deleg_stateid.other, 12);
+        enc.encode_bool(false);  // recall = false
+        // space_limit: limitby=NFS_LIMIT_SIZE, filesize=unlimited
+        enc.encode_uint32(NFS_LIMIT_SIZE);
+        enc.encode_uint64(UINT64_MAX);
+        // nfsace4: type=ALLOW(0), flag=0, access_mask=READ|WRITE(0x6), who=""
+        enc.encode_uint32(0);
+        enc.encode_uint32(0);
+        enc.encode_uint32(0x00000006); // ACE4_READ_DATA | ACE4_WRITE_DATA
+        enc.encode_string("");
+    }
 
     return Nfs4Stat::NFS4_OK;
 }
@@ -991,4 +1061,17 @@ Nfs4Stat Nfs4Server::op_verify(CompoundState& cs, XdrDecoder& args, XdrEncoder&)
 // RFC 7530 §16.14 - NVERIFY
 Nfs4Stat Nfs4Server::op_nverify(CompoundState& cs, XdrDecoder& args, XdrEncoder&) {
     return verify_common(cs, args, true);
+}
+
+// RFC 7530 §16.5 - DELEGRETURN
+Nfs4Stat Nfs4Server::op_delegreturn(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    Nfs4StateId stateid;
+    decode_stateid(args, stateid);
+    return state_.delegreturn(stateid);
+}
+
+// RFC 7530 §16.4 - DELEGPURGE
+Nfs4Stat Nfs4Server::op_delegpurge(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    uint64_t clientid = args.decode_uint64();
+    return state_.delegpurge(clientid);
 }

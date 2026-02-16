@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nfs4/nfs4_types.h"
+#include "nfs4/nfs4_callback.h"
 #include "vfs/vfs.h"
 #include <array>
 #include <chrono>
@@ -20,6 +21,7 @@ struct Nfs4Client {
     std::vector<uint8_t> client_id;    // nfs_client_id4.id (opaque)
     bool confirmed = false;
     std::chrono::steady_clock::time_point last_renewed;
+    Nfs4CallbackInfo cb_info;          // callback channel from SETCLIENTID
 };
 
 // RFC 7530 §16.10 - Lock owner identity
@@ -68,6 +70,15 @@ struct Nfs4OpenState {
     bool confirmed = false;           // needs OPEN_CONFIRM
 };
 
+// RFC 7530 §10.4 - Delegation state
+struct Nfs4DelegState {
+    Nfs4StateId stateid;
+    uint64_t clientid = 0;
+    FileHandle fh;
+    uint32_t deleg_type = OPEN_DELEGATE_NONE;  // READ or WRITE
+    bool recalled = false;
+};
+
 class Nfs4StateManager {
 public:
     Nfs4StateManager();
@@ -77,7 +88,8 @@ public:
     // Returns {clientid, confirm_verifier}
     std::pair<uint64_t, std::array<uint8_t, 8>>
         set_clientid(const uint8_t verifier[8],
-                     const std::vector<uint8_t>& client_id);
+                     const std::vector<uint8_t>& client_id,
+                     const Nfs4CallbackInfo& cb = {});
 
     // RFC 7530 §16.34 - SETCLIENTID_CONFIRM
     Nfs4Stat confirm_clientid(uint64_t clientid,
@@ -90,7 +102,12 @@ public:
                        const FileHandle& fh,
                        uint32_t access, uint32_t deny,
                        Nfs4StateId& out_stateid,
-                       bool& needs_confirm);
+                       bool& needs_confirm,
+                       uint32_t& out_deleg_type,
+                       Nfs4StateId& out_deleg_stateid,
+                       Nfs4CallbackInfo& out_recall_cb,
+                       Nfs4StateId& out_recall_deleg_sid,
+                       FileHandle& out_recall_fh);
 
     // RFC 7530 §16.18 - OPEN_CONFIRM
     Nfs4Stat confirm_open(const Nfs4StateId& stateid, uint32_t seqid,
@@ -150,6 +167,18 @@ public:
     // RFC 7530 §16.26 - RELEASE_LOCKOWNER
     Nfs4Stat release_lock_owner(const Nfs4LockOwner& lock_owner);
 
+    // RFC 7530 §16.5 - DELEGRETURN
+    Nfs4Stat delegreturn(const Nfs4StateId& stateid);
+
+    // RFC 7530 §16.4 - DELEGPURGE
+    Nfs4Stat delegpurge(uint64_t clientid);
+
+    // Get callback info for a client
+    Nfs4CallbackInfo get_client_callback(uint64_t clientid);
+
+    // Invalidate callback (CB_NULL probe failed)
+    void invalidate_client_callback(uint64_t clientid);
+
 private:
     // Lookup open state by stateid.other bytes
     Nfs4OpenState* find_open_state(const Nfs4StateId& sid);
@@ -176,6 +205,10 @@ private:
     std::map<std::vector<uint8_t>, uint64_t> client_id_to_clientid_; // nfs_client_id4 -> clientid
     std::vector<Nfs4OpenState> open_states_;
     std::vector<Nfs4LockState> lock_states_;
+    std::vector<Nfs4DelegState> deleg_states_;
+
+    // Find delegation state by stateid.other
+    Nfs4DelegState* find_deleg_state(const Nfs4StateId& sid);
 
     std::atomic<bool> reaper_running_{true};
     std::thread reaper_thread_;

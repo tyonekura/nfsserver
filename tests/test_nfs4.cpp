@@ -1,9 +1,28 @@
 #include <gtest/gtest.h>
 #include "nfs4/nfs4_types.h"
 #include "nfs4/nfs4_attrs.h"
+#include "nfs4/nfs4_callback.h"
 #include "nfs4/nfs4_state.h"
 #include "nfs4/nfs4_server.h"
 #include "xdr/xdr_codec.h"
+
+// Helper: call open_file with delegation out-params (ignoring them)
+static Nfs4Stat open_file_simple(Nfs4StateManager& mgr, uint64_t clientid,
+                                  const std::vector<uint8_t>& owner,
+                                  uint32_t seqid, const FileHandle& fh,
+                                  uint32_t access, uint32_t deny,
+                                  Nfs4StateId& out_stateid,
+                                  bool& needs_confirm) {
+    uint32_t deleg_type = OPEN_DELEGATE_NONE;
+    Nfs4StateId deleg_sid;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+    return mgr.open_file(clientid, owner, seqid, fh, access, deny,
+                          out_stateid, needs_confirm,
+                          deleg_type, deleg_sid,
+                          recall_cb, recall_sid, recall_fh);
+}
 
 // --- Attribute codec tests ---
 
@@ -154,7 +173,7 @@ TEST(Nfs4State, OpenConfirmClose) {
     Nfs4StateId stateid;
     bool needs_confirm = false;
 
-    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_READ,
+    EXPECT_EQ(open_file_simple(mgr, clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_READ,
                              OPEN4_SHARE_DENY_NONE, stateid, needs_confirm),
               Nfs4Stat::NFS4_OK);
     EXPECT_TRUE(needs_confirm);
@@ -224,7 +243,7 @@ TEST(Nfs4State, BadSeqid) {
     Nfs4StateId stateid;
     bool needs_confirm = false;
 
-    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_READ,
+    EXPECT_EQ(open_file_simple(mgr, clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_READ,
                              OPEN4_SHARE_DENY_NONE, stateid, needs_confirm),
               Nfs4Stat::NFS4_OK);
 
@@ -265,8 +284,8 @@ struct LockTestFixture {
         std::vector<uint8_t> owner = {1, 2, 3};
         bool needs_confirm = false;
 
-        mgr.open_file(clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_BOTH,
-                       OPEN4_SHARE_DENY_NONE, open_stateid, needs_confirm);
+        open_file_simple(mgr, clientid, owner, 1, fh, OPEN4_SHARE_ACCESS_BOTH,
+                         OPEN4_SHARE_DENY_NONE, open_stateid, needs_confirm);
         Nfs4StateId confirmed_sid;
         mgr.confirm_open(open_stateid, 2, confirmed_sid);
         open_stateid = confirmed_sid;
@@ -495,6 +514,309 @@ TEST(Nfs4Lock, RangeSplit) {
     EXPECT_EQ(f.mgr.lock_new(f.clientid, f.open_stateid, f.next_open_seqid++,
                               owner3, 0, f.fh, WRITE_LT, 600, 100,
                               lock_sid4, denied), Nfs4Stat::NFS4ERR_DENIED);
+}
+
+// --- Callback tests ---
+
+TEST(Nfs4Callback, ParseUniversalAddr) {
+    std::string host;
+    uint16_t port;
+    EXPECT_TRUE(parse_universal_addr("192.168.1.1.8.1", host, port));
+    EXPECT_EQ(host, "192.168.1.1");
+    EXPECT_EQ(port, 8u * 256 + 1);  // 2049
+}
+
+TEST(Nfs4Callback, ParseUniversalAddrZeroPort) {
+    std::string host;
+    uint16_t port;
+    EXPECT_TRUE(parse_universal_addr("10.0.0.1.0.0", host, port));
+    EXPECT_EQ(host, "10.0.0.1");
+    EXPECT_EQ(port, 0u);
+}
+
+TEST(Nfs4Callback, ParseUniversalAddrBad) {
+    std::string host;
+    uint16_t port;
+    EXPECT_FALSE(parse_universal_addr("192.168.1.1.8", host, port));     // too short
+    EXPECT_FALSE(parse_universal_addr("192.168.1.1.8.1.2", host, port)); // too long
+    EXPECT_FALSE(parse_universal_addr("192.168.1.1.256.0", host, port)); // overflow
+    EXPECT_FALSE(parse_universal_addr("", host, port));                   // empty
+}
+
+// --- Delegation tests ---
+
+// Helper: create a client with valid callback info
+static uint64_t setup_client_with_cb(Nfs4StateManager& mgr) {
+    uint8_t verifier[8] = {1};
+    std::vector<uint8_t> cid = {1};
+    Nfs4CallbackInfo cb;
+    cb.cb_program = NFS4_CALLBACK;
+    cb.r_netid = "tcp";
+    cb.r_addr = "127.0.0.1.8.1";
+    cb.callback_ident = 1;
+    cb.valid = true;
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid, cb);
+    mgr.confirm_clientid(clientid, confirm.data());
+    return clientid;
+}
+
+static uint64_t setup_client_no_cb(Nfs4StateManager& mgr,
+                                    std::vector<uint8_t> cid_bytes = {2}) {
+    uint8_t verifier[8] = {2};
+    Nfs4CallbackInfo cb;  // cb.valid = false
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid_bytes, cb);
+    mgr.confirm_clientid(clientid, confirm.data());
+    return clientid;
+}
+
+TEST(Nfs4Deleg, GrantReadDelegation) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_with_cb(mgr);
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh,
+                             OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                             open_sid, needs_confirm,
+                             deleg_type, deleg_sid,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4_OK);
+    EXPECT_EQ(deleg_type, OPEN_DELEGATE_READ);
+    EXPECT_NE(deleg_sid.seqid, 0u);
+}
+
+TEST(Nfs4Deleg, GrantWriteDelegation) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_with_cb(mgr);
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh,
+                             OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE,
+                             open_sid, needs_confirm,
+                             deleg_type, deleg_sid,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4_OK);
+    EXPECT_EQ(deleg_type, OPEN_DELEGATE_WRITE);
+}
+
+TEST(Nfs4Deleg, NoGrantWithoutCallback) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_no_cb(mgr, {1});
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    mgr.open_file(clientid, owner, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+    EXPECT_EQ(deleg_type, OPEN_DELEGATE_NONE);
+}
+
+TEST(Nfs4Deleg, NoGrantOtherClientOpen) {
+    Nfs4StateManager mgr;
+    uint64_t client1 = setup_client_with_cb(mgr);
+    uint64_t client2 = setup_client_no_cb(mgr, {2});
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    // Client2 opens first (no delegation, no cb)
+    std::vector<uint8_t> owner2 = {2};
+    mgr.open_file(client2, owner2, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+
+    // Client1 opens — should not get delegation since client2 has file open
+    std::vector<uint8_t> owner1 = {1};
+    mgr.open_file(client1, owner1, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+    EXPECT_EQ(deleg_type, OPEN_DELEGATE_NONE);
+}
+
+TEST(Nfs4Deleg, DelegReturn) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_with_cb(mgr);
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    mgr.open_file(clientid, owner, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+    ASSERT_EQ(deleg_type, OPEN_DELEGATE_READ);
+
+    // DELEGRETURN
+    EXPECT_EQ(mgr.delegreturn(deleg_sid), Nfs4Stat::NFS4_OK);
+
+    // Delegation stateid should now be invalid
+    EXPECT_EQ(mgr.validate_stateid(deleg_sid, OPEN4_SHARE_ACCESS_READ),
+              Nfs4Stat::NFS4ERR_BAD_STATEID);
+}
+
+TEST(Nfs4Deleg, DelegPurge) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_with_cb(mgr);
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    mgr.open_file(clientid, owner, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+    ASSERT_EQ(deleg_type, OPEN_DELEGATE_READ);
+
+    // DELEGPURGE removes all delegations for client
+    EXPECT_EQ(mgr.delegpurge(clientid), Nfs4Stat::NFS4_OK);
+    EXPECT_EQ(mgr.validate_stateid(deleg_sid, OPEN4_SHARE_ACCESS_READ),
+              Nfs4Stat::NFS4ERR_BAD_STATEID);
+}
+
+TEST(Nfs4Deleg, ConflictTriggerDelay) {
+    Nfs4StateManager mgr;
+    uint64_t client1 = setup_client_with_cb(mgr);
+    uint64_t client2 = setup_client_no_cb(mgr, {2});
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    // Client1 opens and gets write delegation
+    std::vector<uint8_t> owner1 = {1};
+    EXPECT_EQ(mgr.open_file(client1, owner1, 1, fh,
+                             OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_NONE,
+                             open_sid, needs_confirm,
+                             deleg_type, deleg_sid,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4_OK);
+    ASSERT_EQ(deleg_type, OPEN_DELEGATE_WRITE);
+
+    // Client2 opens same file — conflicts with delegation → NFS4ERR_DELAY
+    std::vector<uint8_t> owner2 = {2};
+    Nfs4StateId open_sid2, deleg_sid2;
+    EXPECT_EQ(mgr.open_file(client2, owner2, 1, fh,
+                             OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                             open_sid2, needs_confirm,
+                             deleg_type, deleg_sid2,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4ERR_DELAY);
+
+    // Simulate DELEGRETURN from client1
+    EXPECT_EQ(mgr.delegreturn(deleg_sid), Nfs4Stat::NFS4_OK);
+
+    // Client2 retries — should succeed now
+    EXPECT_EQ(mgr.open_file(client2, owner2, 1, fh,
+                             OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                             open_sid2, needs_confirm,
+                             deleg_type, deleg_sid2,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Deleg, ValidateDelegStateid) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_with_cb(mgr);
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    // Get read delegation
+    mgr.open_file(clientid, owner, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+    ASSERT_EQ(deleg_type, OPEN_DELEGATE_READ);
+
+    // Read delegation validates for read
+    EXPECT_EQ(mgr.validate_stateid(deleg_sid, OPEN4_SHARE_ACCESS_READ),
+              Nfs4Stat::NFS4_OK);
+    // Read delegation does NOT validate for write
+    EXPECT_EQ(mgr.validate_stateid(deleg_sid, OPEN4_SHARE_ACCESS_WRITE),
+              Nfs4Stat::NFS4ERR_ACCESS);
+}
+
+TEST(Nfs4Deleg, InvalidateClientCallback) {
+    Nfs4StateManager mgr;
+    uint64_t clientid = setup_client_with_cb(mgr);
+
+    // Invalidate callback
+    mgr.invalidate_client_callback(clientid);
+
+    // Now open should NOT grant delegation
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId open_sid, deleg_sid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    mgr.open_file(clientid, owner, 1, fh,
+                  OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                  open_sid, needs_confirm,
+                  deleg_type, deleg_sid,
+                  recall_cb, recall_sid, recall_fh);
+    EXPECT_EQ(deleg_type, OPEN_DELEGATE_NONE);
 }
 
 // --- COMPOUND dispatch tests ---
