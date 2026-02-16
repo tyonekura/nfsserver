@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "rpc/rpc_server.h"
 #include "rpc/rpc_types.h"
+#include "rpc/portmapper.h"
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -215,4 +216,29 @@ TEST(RpcServer, SendTcpErrorHandling) {
     // Server should still be running fine
     server.stop();
     // If we get here without crash/hang, the test passes
+}
+
+// --- Portmapper tests ---
+
+TEST(Portmapper, Constants) {
+    EXPECT_EQ(PMAP_PROGRAM, 100000u);
+    EXPECT_EQ(PMAP_VERSION, 2u);
+    EXPECT_EQ(PMAPPROC_SET, 1u);
+    EXPECT_EQ(PMAPPROC_UNSET, 2u);
+    EXPECT_EQ(IPPROTO_TCP_PMAP, 6u);
+}
+
+TEST(Portmapper, RegisterFailsGracefully) {
+    // When portmapper is not running (no rpcbind on port 111 in test env),
+    // pmap_register should return false without crashing
+    bool result = pmap_register(100003, 3, 2049);
+    // We don't assert the result — it depends on whether rpcbind is running.
+    // The important thing is it doesn't crash or hang.
+    (void)result;
+}
+
+TEST(Portmapper, UnregisterFailsGracefully) {
+    // Same as above — should not crash even if portmapper unreachable
+    bool result = pmap_unregister(100003, 3);
+    (void)result;
 }

@@ -14,7 +14,7 @@
 | 23 | RPCSEC_GSS / Kerberos | Pending |
 | 24 | OP_OPENATTR | Pending |
 | 25 | UDP transport | Pending |
-| 26 | Portmapper / rpcbind | Pending |
+| 26 | Portmapper / rpcbind | Done |
 | 27 | FS_LOCATIONS attribute | Pending |
 | 28 | Quota attributes | Pending |
 | 29 | ACLSUPPORT attribute | Pending |

@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(nfs_lib STATIC
     src/xdr/xdr_codec.cpp
     src/rpc/rpc_server.cpp
+    src/rpc/portmapper.cpp
     src/vfs/vfs.cpp
     src/vfs/local_fs.cpp
     src/mount/mount_server.cpp

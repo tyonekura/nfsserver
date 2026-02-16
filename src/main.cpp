@@ -1,9 +1,10 @@
-// NFSv3 server entry point.
-// MOUNT v3 (RFC 1813 Appendix I) and NFS v3 (RFC 1813) share a single
-// RPC server on one TCP port — no portmapper/rpcbind required.
+// NFS server entry point.
+// MOUNT v3, NFS v3, and NFS v4 share a single RPC server on one TCP port.
+// Optionally registers with portmapper/rpcbind on port 111.
 
 #include "rpc/rpc_server.h"
 #include "rpc/rpc_types.h"
+#include "rpc/portmapper.h"
 #include "mount/mount_server.h"
 #include "nfs/nfs_server.h"
 #include "nfs4/nfs4_server.h"
@@ -80,6 +81,7 @@ int main(int argc, char* argv[]) {
                   << "  Port:   " << port << "\n";
 
         rpc.start(port);
+        pmap_register_all(port);
 
         // Wait for shutdown signal (async-signal-safe polling)
         while (!g_shutdown) {
@@ -87,6 +89,7 @@ int main(int argc, char* argv[]) {
             nanosleep(&ts, nullptr);
         }
 
+        pmap_unregister_all();
         rpc.stop();
 
     } catch (const std::exception& e) {

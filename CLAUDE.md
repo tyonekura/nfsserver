@@ -27,7 +27,7 @@ docker run --rm nfsd-test ./build/tests/test_nfs4 --gtest_filter="Nfs4Deleg.Gran
 # Open a shell in the container for debugging
 docker run --rm -it nfsd-test bash
 
-# Integration test (v3 + v4 mount, lock, delegation)
+# Integration test (single-container, loopback)
 docker run --rm --privileged nfsd-test bash -c '
   mkdir -p /tmp/nfs_export && echo test > /tmp/nfs_export/hello.txt
   ./build/nfsd --export /tmp/nfs_export --port 2049 &
@@ -39,6 +39,8 @@ docker run --rm --privileged nfsd-test bash -c '
   flock /mnt/nfs4/hello.txt cat /mnt/nfs4/hello.txt
   echo "=== All OK ==="
 '
+
+# Two-container cross-node test: see docs/integration-test.md
 ```
 
 The `Dockerfile` uses Ubuntu 22.04, installs build-essential/cmake/git, builds the project, and defaults to running `ctest`.
