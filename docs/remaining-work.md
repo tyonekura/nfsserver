@@ -63,8 +63,10 @@ Features required for full RFC compliance but rarely needed for basic file servi
 | 27 | FS_LOCATIONS attribute | v4 | M | Encode filesystem location referrals. Allows clients to follow server-indicated migration/replication paths. Useful for multi-server setups. |
 | 28 | Quota attributes | v4 | M | QUOTA_AVAIL_HARD/SOFT/USED. Query filesystem quotas via `quotactl()` and encode in fattr4. |
 | 29 | ACLSUPPORT attribute | v4 | S | Report which ACL features are available. Even without full ACL support, should report 0 (no ACL support) rather than omitting the attribute entirely. |
+| 30 | NLM4 — Network Lock Manager | v3 | XL | Advisory byte-range locking for NFSv3 clients (program 100021, version 4). Currently clients must use `mount -o nolock`. Requires: NLM XDR types, NlmStateManager (conflict detection, range splitting — reuse algorithms from NFSv4 lock engine), synchronous procedures (NULL/TEST/LOCK/CANCEL/UNLOCK), async MSG variants with NLM4_GRANTED callback, blocking-lock wait queue with background granter thread, FREE_ALL for crash cleanup, cross-protocol conflict detection with NFSv4 locks. RPC dispatch already supports multiple programs on same port. Without NSM: ~3-4 days. |
+| 31 | NSM integration for NLM | v3 | XL | Network Status Monitor client (program 100024) for NLM crash recovery. Register with local rpc.statd via NSM_MON, handle SM_NOTIFY callbacks when clients reboot, release all held locks for crashed clients. Requires portmapper (#26) as prerequisite. Can be deferred — NLM works without NSM but loses lock recovery on client crash. ~1-2 days. |
 
-**Subtotal: ~4-6 weeks**
+**Subtotal: ~5-7 weeks**
 
 ---
 
@@ -74,13 +76,13 @@ Not protocol features, but needed for real-world deployment.
 
 | # | Item | Protocol | Effort | Description |
 |---|------|----------|--------|-------------|
-| 30 | Connection pooling / async I/O | both | XL | Replace thread-per-client with epoll/io_uring event loop. Current model doesn't scale beyond ~100 clients. |
-| 31 | Handle cache bounds | both | M | Handle-to-path cache grows unbounded. Add LRU eviction with configurable max size. |
-| 32 | Multiple exports | both | M | Currently single export path. Support multiple exports with per-export config (path, allowed hosts, access mode). |
-| 33 | Configuration file | both | M | Replace CLI args with config file (YAML/TOML). Export paths, port, log level, domain, lease time. |
-| 34 | Logging framework | both | M | Replace cerr/cout with structured logging (syslog or file-based). Log levels, per-subsystem control. |
-| 35 | Write stability enforcement | v3/v4 | M | UNSTABLE/DATA_SYNC/FILE_SYNC modes are echoed back but all writes are synchronous. Implement async writes with DATA_SYNC (fdatasync) and FILE_SYNC (fsync) distinction. |
-| 36 | macOS / BSD portability | both | L | Replace Linux-only APIs (MSG_NOSIGNAL, utimensat, AT_SYMLINK_NOFOLLOW) with portable alternatives. |
+| 32 | Connection pooling / async I/O | both | XL | Replace thread-per-client with epoll/io_uring event loop. Current model doesn't scale beyond ~100 clients. |
+| 33 | Handle cache bounds | both | M | Handle-to-path cache grows unbounded. Add LRU eviction with configurable max size. |
+| 34 | Multiple exports | both | M | Currently single export path. Support multiple exports with per-export config (path, allowed hosts, access mode). |
+| 35 | Configuration file | both | M | Replace CLI args with config file (YAML/TOML). Export paths, port, log level, domain, lease time. |
+| 36 | Logging framework | both | M | Replace cerr/cout with structured logging (syslog or file-based). Log levels, per-subsystem control. |
+| 37 | Write stability enforcement | v3/v4 | M | UNSTABLE/DATA_SYNC/FILE_SYNC modes are echoed back but all writes are synchronous. Implement async writes with DATA_SYNC (fdatasync) and FILE_SYNC (fsync) distinction. |
+| 38 | macOS / BSD portability | both | L | Replace Linux-only APIs (MSG_NOSIGNAL, utimensat, AT_SYMLINK_NOFOLLOW) with portable alternatives. |
 
 **Subtotal: ~2-3 weeks**
 
@@ -92,9 +94,9 @@ Not protocol features, but needed for real-world deployment.
 |----------|-------|-------------|
 | P1 — Correctness | 8 items | ~3-4 days |
 | P2 — Interoperability | 7 items | ~4-5 days |
-| P3 — Completeness | 14 items | ~4-6 weeks |
+| P3 — Completeness | 16 items | ~5-7 weeks |
 | P4 — Production | 7 items | ~2-3 weeks |
-| **Total** | **36 items** | **~8-12 weeks** |
+| **Total** | **38 items** | **~9-13 weeks** |
 
 ## Recommended Execution Order
 
@@ -104,6 +106,6 @@ Not protocol features, but needed for real-world deployment.
 
 **Week 3:** P2 items #11-15 (VERIFY/NVERIFY, credential threading, EXCLUSIVE create, UTF-8, MKNOD) — complete interoperability layer.
 
-**Weeks 4-8:** P3 items by dependency order: locking (#16) → callback channel (#19) → read delegations (#17) → write delegations (#18). Grace period (#20) and SECINFO (#21) can be done in parallel.
+**Weeks 4-8:** P3 items by dependency order: locking (#16) → callback channel (#19) → read delegations (#17) → write delegations (#18). Grace period (#20) and SECINFO (#21) can be done in parallel. NLM (#30) can run in parallel with v4 delegation work — it reuses range/conflict algorithms from #16 but is otherwise independent. NSM (#31) depends on portmapper (#26).
 
 **Weeks 9+:** P4 production hardening as needed for deployment target.
