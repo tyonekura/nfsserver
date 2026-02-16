@@ -11,9 +11,12 @@ A standalone NFS server implemented from scratch in C++17 for Linux, supporting 
 
 - **NFSv3**: All 22 procedures implemented
 - **NFSv4.0**: COMPOUND dispatch with 22 operation handlers (OPEN, READ, WRITE, CLOSE, READDIR, LOOKUP, CREATE, REMOVE, RENAME, SETATTR, etc.)
-- Both versions served on a single TCP port (no portmapper needed)
-- NFSv4 stateful operations: SETCLIENTID, OPEN/CLOSE with stateids, lease renewal
+- Both versions served on a single TCP port (with optional portmapper/rpcbind registration)
+- NFSv4 stateful operations: SETCLIENTID, OPEN/CLOSE with stateids, lease renewal, grace period
+- NFSv4 byte-range locking (LOCK/LOCKT/LOCKU/RELEASE_LOCKOWNER)
+- NFSv4 read and write delegations with callback channel (CB_RECALL)
 - NFSv4 bitmap-based attribute encoding per RFC 7530/7531
+- NFSv4 ACL support (synthesized from POSIX mode bits)
 - ONC RPC with multi-fragment record reassembly
 - AUTH_NONE and AUTH_SYS credential parsing
 - Local filesystem passthrough via abstract VFS layer
@@ -89,7 +92,8 @@ main.cpp --> RpcServer --> MountServer --> Vfs --> LocalFs
 
 ### Key Design Decisions
 
-- MOUNT, NFSv3, and NFSv4 share a single RPC server on one TCP port — no portmapper/rpcbind required
+- MOUNT, NFSv3, and NFSv4 share a single RPC server on one TCP port
+- Portmapper/rpcbind registration at startup (optional — works without rpcbind too)
 - NFSv4 uses PUTROOTFH + LOOKUP instead of the MOUNT protocol
 - File handles are 16 bytes encoding inode + device numbers
 - Handle-to-path cache is mutex-protected with eviction on delete/rename
@@ -118,7 +122,7 @@ sudo ./build/nfsd --export /path/to/share --port 2049
 | `test_rpc` | AUTH_SYS parsing, version mismatch reply, multi-fragment reassembly |
 | `test_vfs` | File operations, cache eviction, permissions, timestamps |
 | `test_nfs` | NFS procedure encoding, SETATTR guard, CREATE GUARDED, FSINFO/PATHCONF |
-| `test_nfs4` | Bitmap codec, attribute encoding, state management, COMPOUND dispatch |
+| `test_nfs4` | Bitmap codec, attribute encoding, state management, locking, delegations, ACL, COMPOUND dispatch |
 
 ```bash
 # Run all tests
@@ -139,13 +143,10 @@ docker run --rm nfsd-test ./build/tests/test_xdr --gtest_filter="XdrCodec.Uint32
 
 ### NFSv4
 - **Minor version 0 only** — NFSv4.1/4.2 not supported
-- **No delegations** — OPEN always returns OPEN_DELEGATE_NONE
-- **No ACL support** — ACL attribute not implemented
 - **No KERBEROS** — AUTH_SYS only, owner/group encoded as numeric strings
-- **No lease expiry enforcement** — leases tracked but not evicted on timeout
+- **ACLs are mode-based** — synthesized from POSIX permission bits, no per-user/group ACEs
 
 ### General
-- **No portmapper** — all protocols share a single TCP port
 - **No credential threading** — access checks use file permission bits, not per-user uid/gid
 
 ## License

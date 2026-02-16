@@ -231,6 +231,39 @@ constexpr uint32_t OP_CB_RECALL = 4;
 // RFC 7530 §16.16 - write delegation space limit
 constexpr uint32_t NFS_LIMIT_SIZE = 1;
 
+// RFC 7530 §6.2.1 - nfsace4 ACE type constants (acetype4)
+constexpr uint32_t ACE4_ACCESS_ALLOWED_ACE_TYPE = 0;
+constexpr uint32_t ACE4_ACCESS_DENIED_ACE_TYPE  = 1;
+
+// RFC 7530 §6.2.1 - nfsace4 access mask bits (acemask4)
+constexpr uint32_t ACE4_READ_DATA         = 0x00000001;
+constexpr uint32_t ACE4_LIST_DIRECTORY    = 0x00000001;
+constexpr uint32_t ACE4_WRITE_DATA        = 0x00000002;
+constexpr uint32_t ACE4_ADD_FILE          = 0x00000002;
+constexpr uint32_t ACE4_APPEND_DATA       = 0x00000004;
+constexpr uint32_t ACE4_ADD_SUBDIRECTORY  = 0x00000004;
+constexpr uint32_t ACE4_READ_NAMED_ATTRS  = 0x00000008;
+constexpr uint32_t ACE4_WRITE_NAMED_ATTRS = 0x00000010;
+constexpr uint32_t ACE4_EXECUTE           = 0x00000020;
+constexpr uint32_t ACE4_READ_ATTRIBUTES   = 0x00000080;
+constexpr uint32_t ACE4_WRITE_ATTRIBUTES  = 0x00000100;
+constexpr uint32_t ACE4_DELETE            = 0x00010000;
+constexpr uint32_t ACE4_READ_ACL          = 0x00020000;
+constexpr uint32_t ACE4_WRITE_ACL         = 0x00040000;
+constexpr uint32_t ACE4_WRITE_OWNER       = 0x00080000;
+constexpr uint32_t ACE4_SYNCHRONIZE       = 0x00100000;
+
+// RFC 7530 §12 - ACLSUPPORT attribute flags
+constexpr uint32_t ACL4_SUPPORT_ALLOW_ACL = 0x00000001;
+
+// RFC 7530 §6.2.1 - nfsace4
+struct Nfsace4 {
+    uint32_t type;
+    uint32_t flag;
+    uint32_t access_mask;
+    std::string who;
+};
+
 // Lease time in seconds
 constexpr uint32_t NFS4_LEASE_TIME = 90;
 

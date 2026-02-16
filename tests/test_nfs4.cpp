@@ -969,3 +969,153 @@ TEST(Nfs4Ops, SecinfoOpcode) {
     // Verify OP_SECINFO is defined with the correct opcode value (33)
     EXPECT_EQ(static_cast<uint32_t>(Nfs4Op::OP_SECINFO), 33u);
 }
+
+// --- ACL tests ---
+
+TEST(Nfs4Acl, SupportedBitmapHasAclBits) {
+    auto bm = get_supported_bitmap();
+    EXPECT_TRUE(bitmap_isset(bm, FATTR4_ACL));
+    EXPECT_TRUE(bitmap_isset(bm, FATTR4_ACLSUPPORT));
+}
+
+TEST(Nfs4Acl, ModeToAclRegularFile) {
+    auto acl = mode_to_acl(0644, false);
+    ASSERT_EQ(acl.size(), 3u);
+
+    // OWNER@: rw- → read + write + WRITE_ACL/WRITE_OWNER
+    EXPECT_EQ(acl[0].who, "OWNER@");
+    EXPECT_EQ(acl[0].type, ACE4_ACCESS_ALLOWED_ACE_TYPE);
+    EXPECT_TRUE(acl[0].access_mask & ACE4_READ_DATA);
+    EXPECT_TRUE(acl[0].access_mask & ACE4_WRITE_DATA);
+    EXPECT_FALSE(acl[0].access_mask & ACE4_EXECUTE);
+    EXPECT_TRUE(acl[0].access_mask & ACE4_WRITE_ACL);
+    EXPECT_TRUE(acl[0].access_mask & ACE4_WRITE_OWNER);
+
+    // GROUP@: r-- → read only
+    EXPECT_EQ(acl[1].who, "GROUP@");
+    EXPECT_TRUE(acl[1].access_mask & ACE4_READ_DATA);
+    EXPECT_FALSE(acl[1].access_mask & ACE4_WRITE_DATA);
+    EXPECT_FALSE(acl[1].access_mask & ACE4_WRITE_ACL);
+
+    // EVERYONE@: r-- → read + SYNCHRONIZE
+    EXPECT_EQ(acl[2].who, "EVERYONE@");
+    EXPECT_TRUE(acl[2].access_mask & ACE4_READ_DATA);
+    EXPECT_TRUE(acl[2].access_mask & ACE4_SYNCHRONIZE);
+}
+
+TEST(Nfs4Acl, ModeToAclAllPermissions) {
+    auto acl = mode_to_acl(0777, false);
+    ASSERT_EQ(acl.size(), 3u);
+    for (const auto& ace : acl) {
+        EXPECT_TRUE(ace.access_mask & ACE4_READ_DATA);
+        EXPECT_TRUE(ace.access_mask & ACE4_WRITE_DATA);
+        EXPECT_TRUE(ace.access_mask & ACE4_EXECUTE);
+    }
+    EXPECT_TRUE(acl[2].access_mask & ACE4_SYNCHRONIZE);
+}
+
+TEST(Nfs4Acl, ModeToAclZeroPermissions) {
+    auto acl = mode_to_acl(0000, false);
+    // OWNER@ gets WRITE_ACL|WRITE_OWNER; GROUP@ skipped; EVERYONE@ gets SYNCHRONIZE
+    ASSERT_EQ(acl.size(), 2u);
+    EXPECT_EQ(acl[0].who, "OWNER@");
+    EXPECT_TRUE(acl[0].access_mask & ACE4_WRITE_ACL);
+    EXPECT_FALSE(acl[0].access_mask & ACE4_READ_DATA);
+    EXPECT_EQ(acl[1].who, "EVERYONE@");
+    EXPECT_TRUE(acl[1].access_mask & ACE4_SYNCHRONIZE);
+    EXPECT_FALSE(acl[1].access_mask & ACE4_READ_DATA);
+}
+
+TEST(Nfs4Acl, AclRoundTrip) {
+    uint32_t original_mode = 0755;
+    auto acl = mode_to_acl(original_mode, false);
+
+    XdrEncoder enc;
+    encode_acl4(enc, acl);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    uint32_t recovered_mode = decode_acl4_to_mode(dec);
+    EXPECT_EQ(recovered_mode, original_mode);
+}
+
+TEST(Nfs4Acl, EncodeFattr4Acl) {
+    Fattr3 attr{};
+    attr.type = Ftype3::NF3REG;
+    attr.mode = 0640;
+    attr.fileid = 1;
+    attr.fsid = 1;
+
+    FileHandle fh{};
+    fh.len = 16;
+
+    std::vector<uint32_t> requested;
+    bitmap_set(requested, FATTR4_ACL);
+
+    XdrEncoder enc;
+    encode_fattr4(enc, requested, attr, fh);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    auto result_bm = decode_bitmap(dec);
+    EXPECT_TRUE(bitmap_isset(result_bm, FATTR4_ACL));
+    EXPECT_FALSE(bitmap_isset(result_bm, FATTR4_ACLSUPPORT));
+
+    auto attr_data = dec.decode_opaque();
+    XdrDecoder attr_dec(attr_data.data(), attr_data.size());
+
+    uint32_t count = attr_dec.decode_uint32();
+    EXPECT_GE(count, 2u);  // OWNER@ and GROUP@; EVERYONE@ has no r/w/x
+
+    // First ACE: OWNER@ with rw
+    EXPECT_EQ(attr_dec.decode_uint32(), ACE4_ACCESS_ALLOWED_ACE_TYPE);
+    attr_dec.decode_uint32();  // flag
+    uint32_t mask = attr_dec.decode_uint32();
+    EXPECT_TRUE(mask & ACE4_READ_DATA);
+    EXPECT_TRUE(mask & ACE4_WRITE_DATA);
+    EXPECT_EQ(attr_dec.decode_string(), "OWNER@");
+}
+
+TEST(Nfs4Acl, AclsupportAttribute) {
+    Fattr3 attr{};
+    attr.type = Ftype3::NF3REG;
+    attr.mode = 0644;
+    attr.fileid = 1;
+    attr.fsid = 1;
+
+    FileHandle fh{};
+    fh.len = 16;
+
+    std::vector<uint32_t> requested;
+    bitmap_set(requested, FATTR4_ACLSUPPORT);
+
+    XdrEncoder enc;
+    encode_fattr4(enc, requested, attr, fh);
+
+    XdrDecoder dec(enc.data().data(), enc.size());
+    auto result_bm = decode_bitmap(dec);
+    EXPECT_TRUE(bitmap_isset(result_bm, FATTR4_ACLSUPPORT));
+
+    auto attr_data = dec.decode_opaque();
+    XdrDecoder attr_dec(attr_data.data(), attr_data.size());
+    EXPECT_EQ(attr_dec.decode_uint32(), ACL4_SUPPORT_ALLOW_ACL);
+}
+
+TEST(Nfs4Acl, DecodeSetAttrWithAcl) {
+    auto acl = mode_to_acl(0755, false);
+
+    XdrEncoder acl_enc;
+    encode_acl4(acl_enc, acl);
+
+    std::vector<uint32_t> bm;
+    bitmap_set(bm, FATTR4_ACL);
+
+    XdrEncoder payload;
+    encode_bitmap(payload, bm);
+    payload.encode_opaque(acl_enc.data().data(), acl_enc.size());
+
+    XdrDecoder dec(payload.data().data(), payload.size());
+    auto sa = decode_fattr4_setattr(dec);
+
+    EXPECT_TRUE(sa.has_acl);
+    EXPECT_EQ(sa.mode, 0755u);
+    EXPECT_EQ(sa.size, UINT64_MAX);
+}

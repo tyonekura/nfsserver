@@ -10,11 +10,11 @@
 | 19 | Callback channel | Done |
 | 20 | Grace period / CLAIM_PREVIOUS | Done |
 | 21 | OP_SECINFO | Done |
-| 22 | ACL support | Pending |
+| 22 | ACL support | Done |
 | 23 | RPCSEC_GSS / Kerberos | Pending |
 | 24 | OP_OPENATTR | Pending |
 | 25 | UDP transport | Pending |
 | 26 | Portmapper / rpcbind | Done |
 | 27 | FS_LOCATIONS attribute | Pending |
 | 28 | Quota attributes | Pending |
-| 29 | ACLSUPPORT attribute | Pending |
+| 29 | ACLSUPPORT attribute | Done |

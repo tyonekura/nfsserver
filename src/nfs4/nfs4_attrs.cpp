@@ -84,6 +84,8 @@ std::vector<uint32_t> get_supported_bitmap() {
     bitmap_set(bm, FATTR4_UNIQUE_HANDLES);   // 9
     bitmap_set(bm, FATTR4_LEASE_TIME);       // 10
     bitmap_set(bm, FATTR4_RDATTR_ERROR);     // 11
+    bitmap_set(bm, FATTR4_ACL);             // 12
+    bitmap_set(bm, FATTR4_ACLSUPPORT);     // 13
     bitmap_set(bm, FATTR4_CANSETTIME);       // 15
     bitmap_set(bm, FATTR4_CASE_INSENSITIVE); // 16
     bitmap_set(bm, FATTR4_CASE_PRESERVING);  // 17
@@ -124,6 +126,71 @@ std::vector<uint32_t> get_supported_bitmap() {
 static void encode_nfstime4(XdrEncoder& enc, const NfsTime3& t) {
     enc.encode_int64(static_cast<int64_t>(t.seconds));
     enc.encode_uint32(t.nseconds);
+}
+
+// RFC 7530 §6.4.1 - Synthesize NFSv4 ACEs from POSIX mode bits
+std::vector<Nfsace4> mode_to_acl(uint32_t mode, bool is_dir) {
+    const uint32_t read_mask = ACE4_READ_NAMED_ATTRS | ACE4_READ_ATTRIBUTES | ACE4_READ_ACL
+                             | (is_dir ? ACE4_LIST_DIRECTORY : ACE4_READ_DATA);
+    const uint32_t write_mask = ACE4_WRITE_NAMED_ATTRS | ACE4_WRITE_ATTRIBUTES
+                              | (is_dir ? (ACE4_ADD_FILE | ACE4_ADD_SUBDIRECTORY)
+                                        : (ACE4_WRITE_DATA | ACE4_APPEND_DATA));
+    const uint32_t exec_mask = ACE4_EXECUTE;
+
+    std::vector<Nfsace4> aces;
+
+    auto add_ace = [&](const char* who, uint32_t bits,
+                       bool add_owner_perms, bool add_sync) {
+        uint32_t mask = 0;
+        if (bits & 04) mask |= read_mask;
+        if (bits & 02) mask |= write_mask;
+        if (bits & 01) mask |= exec_mask;
+        if (add_owner_perms) mask |= ACE4_WRITE_ACL | ACE4_WRITE_OWNER;
+        if (add_sync) mask |= ACE4_SYNCHRONIZE;
+        if (mask == 0) return;
+        aces.push_back({ACE4_ACCESS_ALLOWED_ACE_TYPE, 0, mask, who});
+    };
+
+    add_ace("OWNER@",    (mode >> 6) & 07, true,  false);
+    add_ace("GROUP@",    (mode >> 3) & 07, false, false);
+    add_ace("EVERYONE@", (mode >> 0) & 07, false, true);
+
+    return aces;
+}
+
+void encode_acl4(XdrEncoder& enc, const std::vector<Nfsace4>& acl) {
+    enc.encode_uint32(static_cast<uint32_t>(acl.size()));
+    for (const auto& ace : acl) {
+        enc.encode_uint32(ace.type);
+        enc.encode_uint32(ace.flag);
+        enc.encode_uint32(ace.access_mask);
+        enc.encode_string(ace.who);
+    }
+}
+
+uint32_t decode_acl4_to_mode(XdrDecoder& dec) {
+    uint32_t count = dec.decode_uint32();
+    uint32_t owner_bits = 0, group_bits = 0, other_bits = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t type = dec.decode_uint32();
+        dec.decode_uint32();  // flag
+        uint32_t access_mask = dec.decode_uint32();
+        std::string who = dec.decode_string();
+
+        if (type != ACE4_ACCESS_ALLOWED_ACE_TYPE) continue;
+
+        uint32_t bits = 0;
+        if (access_mask & ACE4_READ_DATA)  bits |= 04;
+        if (access_mask & ACE4_WRITE_DATA) bits |= 02;
+        if (access_mask & ACE4_EXECUTE)    bits |= 01;
+
+        if      (who == "OWNER@")    owner_bits = bits;
+        else if (who == "GROUP@")    group_bits = bits;
+        else if (who == "EVERYONE@") other_bits = bits;
+    }
+
+    return (owner_bits << 6) | (group_bits << 3) | other_bits;
 }
 
 void encode_fattr4(XdrEncoder& enc,
@@ -186,8 +253,14 @@ void encode_fattr4(XdrEncoder& enc,
     if (bitmap_isset(result, FATTR4_RDATTR_ERROR)) {      // 11
         attr_data.encode_uint32(0); // NFS4_OK
     }
-    // 12 ACL - not supported
-    // 13 ACLSUPPORT - not supported
+    if (bitmap_isset(result, FATTR4_ACL)) {           // 12
+        bool is_dir = (attr.type == Ftype3::NF3DIR);
+        auto acl = mode_to_acl(attr.mode & 07777, is_dir);
+        encode_acl4(attr_data, acl);
+    }
+    if (bitmap_isset(result, FATTR4_ACLSUPPORT)) {    // 13
+        attr_data.encode_uint32(ACL4_SUPPORT_ALLOW_ACL);
+    }
     // 14 ARCHIVE - not supported
     if (bitmap_isset(result, FATTR4_CANSETTIME)) {        // 15
         attr_data.encode_bool(true);
@@ -311,6 +384,10 @@ Nfs4SetAttr decode_fattr4_setattr(XdrDecoder& dec) {
     // Decode in bitmap order (only the ones we support for SETATTR)
     if (bitmap_isset(bm, FATTR4_SIZE)) {
         sa.size = attr_dec.decode_uint64();
+    }
+    if (bitmap_isset(bm, FATTR4_ACL)) {               // 12
+        sa.mode = decode_acl4_to_mode(attr_dec);
+        sa.has_acl = true;
     }
     if (bitmap_isset(bm, FATTR4_MODE)) {
         sa.mode = attr_dec.decode_uint32();

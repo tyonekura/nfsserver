@@ -46,6 +46,12 @@ struct Nfs4SetAttr {
     uint64_t size = UINT64_MAX;
     NfsTimeSet atime;
     NfsTimeSet mtime;
+    bool has_acl = false;
 };
 
 Nfs4SetAttr decode_fattr4_setattr(XdrDecoder& dec);
+
+// ACL helpers: synthesize NFSv4 ACLs from POSIX mode bits
+std::vector<Nfsace4> mode_to_acl(uint32_t mode, bool is_dir);
+void encode_acl4(XdrEncoder& enc, const std::vector<Nfsace4>& acl);
+uint32_t decode_acl4_to_mode(XdrDecoder& dec);

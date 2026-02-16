@@ -675,11 +675,11 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         enc.encode_uint32(deleg_stateid.seqid);
         enc.encode_opaque_fixed(deleg_stateid.other, 12);
         enc.encode_bool(false);  // recall = false
-        // nfsace4: type=ALLOW(0), flag=0, access_mask=READ_DATA(1), who=""
-        enc.encode_uint32(0);          // ACE4_ACCESS_ALLOWED_ACE_TYPE
-        enc.encode_uint32(0);          // aceflag
-        enc.encode_uint32(0x00000001); // ACE4_READ_DATA
-        enc.encode_string("");         // who
+        // nfsace4: type=ALLOW, flag=0, access_mask=READ_DATA, who=""
+        enc.encode_uint32(ACE4_ACCESS_ALLOWED_ACE_TYPE);
+        enc.encode_uint32(0);
+        enc.encode_uint32(ACE4_READ_DATA);
+        enc.encode_string("");
     } else if (deleg_type == OPEN_DELEGATE_WRITE) {
         // open_write_delegation4: stateid, recall, space_limit, nfsace4
         enc.encode_uint32(deleg_stateid.seqid);
@@ -688,10 +688,10 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         // space_limit: limitby=NFS_LIMIT_SIZE, filesize=unlimited
         enc.encode_uint32(NFS_LIMIT_SIZE);
         enc.encode_uint64(UINT64_MAX);
-        // nfsace4: type=ALLOW(0), flag=0, access_mask=READ|WRITE(0x6), who=""
+        // nfsace4: type=ALLOW, flag=0, access_mask=WRITE_DATA|APPEND_DATA, who=""
+        enc.encode_uint32(ACE4_ACCESS_ALLOWED_ACE_TYPE);
         enc.encode_uint32(0);
-        enc.encode_uint32(0);
-        enc.encode_uint32(0x00000006); // ACE4_READ_DATA | ACE4_WRITE_DATA
+        enc.encode_uint32(ACE4_WRITE_DATA | ACE4_APPEND_DATA);
         enc.encode_string("");
     }
 
@@ -979,6 +979,7 @@ Nfs4Stat Nfs4Server::op_setattr(CompoundState& cs, XdrDecoder& args, XdrEncoder&
     std::vector<uint32_t> attrsset;
     if (sa.mode != UINT32_MAX) bitmap_set(attrsset, FATTR4_MODE);
     if (sa.size != UINT64_MAX) bitmap_set(attrsset, FATTR4_SIZE);
+    if (sa.has_acl) bitmap_set(attrsset, FATTR4_ACL);
     encode_bitmap(enc, attrsset);
 
     return Nfs4Stat::NFS4_OK;
