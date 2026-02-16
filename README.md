@@ -14,6 +14,8 @@ A standalone NFS server implemented from scratch in C++17 for Linux, supporting 
 - Both versions served on a single TCP port (with optional portmapper/rpcbind registration)
 - NFSv4 stateful operations: SETCLIENTID, OPEN/CLOSE with stateids, lease renewal, grace period
 - NFSv4 byte-range locking (LOCK/LOCKT/LOCKU/RELEASE_LOCKOWNER)
+- NLM v4 (Network Lock Manager) for NFSv3 byte-range locking with cross-protocol conflict detection
+- NSM client (Network Status Monitor) for NLM crash recovery
 - NFSv4 read and write delegations with callback channel (CB_RECALL)
 - NFSv4 bitmap-based attribute encoding per RFC 7530/7531
 - NFSv4 ACL support (synthesized from POSIX mode bits)
@@ -37,7 +39,7 @@ docker run --rm --privileged -v /path/to/share:/export nfsd-test \
   ./build/nfsd --export /export --port 2049
 
 # Mount from a Linux client (NFSv3)
-mount -t nfs -o vers=3,proto=tcp,port=2049,mountport=2049,nolock,noacl \
+mount -t nfs -o vers=3,proto=tcp,port=2049,mountport=2049,noacl \
   <server-ip>:/export /mnt/nfs
 
 # Mount from a Linux client (NFSv4)
@@ -53,7 +55,7 @@ docker run --rm --privileged nfsd-test bash -c '
   echo "hello NFS" > /export/test.txt
   ./build/nfsd --export /export --port 2049 &
   sleep 1
-  mount -t nfs -o vers=3,proto=tcp,port=2049,mountport=2049,nolock,noacl \
+  mount -t nfs -o vers=3,proto=tcp,port=2049,mountport=2049,noacl \
     127.0.0.1:/export /mnt/nfs
   cat /mnt/nfs/test.txt
   echo "written via NFS" > /mnt/nfs/newfile.txt
@@ -78,7 +80,8 @@ docker run --rm --privileged nfsd-test bash -c '
 ```
 main.cpp --> RpcServer --> MountServer --> Vfs --> LocalFs
                       |--> NfsServer  --/
-                      \--> Nfs4Server --/
+                      |--> Nfs4Server --/
+                      \--> NlmServer  --> ByteRangeLockTable (shared with Nfs4Server)
 ```
 
 | Layer | Directory | Description |
@@ -89,6 +92,9 @@ main.cpp --> RpcServer --> MountServer --> Vfs --> LocalFs
 | MOUNT | `src/mount/` | MOUNT v3 protocol. Returns root file handle. |
 | NFS v3 | `src/nfs/` | All 22 NFSv3 procedures with dispatch framework. |
 | NFS v4 | `src/nfs4/` | NFSv4.0 COMPOUND dispatch, bitmap attrs, state management. |
+| NLM | `src/nlm/` | Network Lock Manager v4 for NFSv3 byte-range locking. |
+| NSM | `src/nsm/` | Network Status Monitor client for NLM crash recovery. |
+| Locking | `src/locking/` | Shared byte-range lock table (used by NFSv4 and NLM). |
 
 ### Key Design Decisions
 
@@ -114,7 +120,7 @@ sudo ./build/nfsd --export /path/to/share --port 2049
 
 ## Tests
 
-5 test suites using GoogleTest:
+7 test suites using GoogleTest:
 
 | Suite | Coverage |
 |-------|----------|
@@ -123,6 +129,8 @@ sudo ./build/nfsd --export /path/to/share --port 2049
 | `test_vfs` | File operations, cache eviction, permissions, timestamps |
 | `test_nfs` | NFS procedure encoding, SETATTR guard, CREATE GUARDED, FSINFO/PATHCONF |
 | `test_nfs4` | Bitmap codec, attribute encoding, state management, locking, delegations, ACL, COMPOUND dispatch |
+| `test_locking` | Shared lock table: overlap, acquire/release, range splitting, cross-protocol conflict |
+| `test_nlm` | NLM/NSM constants, types, procedure numbers |
 
 ```bash
 # Run all tests
@@ -135,8 +143,7 @@ docker run --rm nfsd-test ./build/tests/test_xdr --gtest_filter="XdrCodec.Uint32
 ## Limitations
 
 ### NFSv3
-- **No NLM** — file locking not implemented (use `nolock` mount option)
-- **No ACL support** — use `noacl` mount option
+- **No ACL support** — use `noacl` mount option (NFSACL sideband program not implemented)
 - **MKNOD** — returns NFS3ERR_NOTSUPP
 - **READDIRPLUS** — returns entries without per-entry attributes/handles
 - **EXCLUSIVE create** — verifier consumed but idempotent retry not fully implemented
