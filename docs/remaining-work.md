@@ -55,7 +55,7 @@ Features required for full RFC compliance but rarely needed for basic file servi
 | 19 | Callback channel | v4 | XL | Server→client RPC for delegation recall (CB_RECALL, CB_GETATTR). Client provides callback info during SETCLIENTID. Server must connect to client's callback port. Required for any delegation support. |
 | 20 | Grace period / CLAIM_PREVIOUS | v4 | L | After server restart, enter grace period (~90s) during which only reclaim operations (CLAIM_PREVIOUS) are allowed. Requires persistent state or at minimum a timer. |
 | 21 | OP_SECINFO | v4 | M | Return available security mechanisms for a given path. Currently only AUTH_SYS. Return a list of {AUTH_SYS} until Kerberos is added. |
-| 22 | ACL support | v3/v4 | XL | POSIX.1e or NFSv4 ACL model. Encode/decode ACL attribute, map to filesystem xattrs or POSIX ACLs. Complex data model with ACE types, flags, masks. |
+| 22 | ACL support (NFSv4) | v4 | XL | ~~Done — mode-based ACL synthesis. GETATTR returns OWNER@/GROUP@/EVERYONE@ ALLOW ACEs from mode bits; SETATTR maps ACL back to chmod. ACLSUPPORT reports ALLOW_ACL.~~ |
 | 23 | RPCSEC_GSS / Kerberos | v3/v4 | XXL | Full GSS-API integration. Requires krb5 libraries, GSSAPI context establishment, integrity/privacy wrapping of RPC messages. Most complex auth feature. |
 | 24 | OP_OPENATTR (named attributes) | v4 | L | Open the named attribute directory for a file. Map to filesystem xattrs. Need to present xattrs as a virtual directory with READDIR/LOOKUP/READ/WRITE. |
 | 25 | UDP transport | v3 | L | Add UDP listener to RPC server alongside TCP. Handle per-datagram RPC (no record marking). Retransmit detection via XID cache. |
@@ -65,6 +65,7 @@ Features required for full RFC compliance but rarely needed for basic file servi
 | 29 | ACLSUPPORT attribute | v4 | S | Report which ACL features are available. Even without full ACL support, should report 0 (no ACL support) rather than omitting the attribute entirely. |
 | 30 | NLM4 — Network Lock Manager | v3 | XL | Advisory byte-range locking for NFSv3 clients (program 100021, version 4). Currently clients must use `mount -o nolock`. Requires: NLM XDR types, NlmStateManager (conflict detection, range splitting — reuse algorithms from NFSv4 lock engine), synchronous procedures (NULL/TEST/LOCK/CANCEL/UNLOCK), async MSG variants with NLM4_GRANTED callback, blocking-lock wait queue with background granter thread, FREE_ALL for crash cleanup, cross-protocol conflict detection with NFSv4 locks. RPC dispatch already supports multiple programs on same port. Without NSM: ~3-4 days. |
 | 31 | NSM integration for NLM | v3 | XL | Network Status Monitor client (program 100024) for NLM crash recovery. Register with local rpc.statd via NSM_MON, handle SM_NOTIFY callbacks when clients reboot, release all held locks for crashed clients. Requires portmapper (#26) as prerequisite. Can be deferred — NLM works without NSM but loses lock recovery on client crash. ~1-2 days. |
+| 39 | NFSACL (NFSv3 ACL) | v3 | L | Sideband RPC program 100227 for NFSv3 ACL support (GETACL/SETACL procedures). Not part of RFC 1813 — separate protocol. Without this, clients must use `mount -o noacl`. Could reuse mode-based ACL synthesis from NFSv4 (#22) or implement full POSIX ACL passthrough via libacl. |
 
 **Subtotal: ~5-7 weeks**
 
@@ -94,9 +95,9 @@ Not protocol features, but needed for real-world deployment.
 |----------|-------|-------------|
 | P1 — Correctness | 8 items | ~3-4 days |
 | P2 — Interoperability | 7 items | ~4-5 days |
-| P3 — Completeness | 16 items | ~5-7 weeks |
+| P3 — Completeness | 17 items | ~5-7 weeks |
 | P4 — Production | 7 items | ~2-3 weeks |
-| **Total** | **38 items** | **~9-13 weeks** |
+| **Total** | **39 items** | **~9-13 weeks** |
 
 ## Recommended Execution Order
 
