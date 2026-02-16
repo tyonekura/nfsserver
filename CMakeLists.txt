@@ -21,9 +21,13 @@ add_library(nfs_lib STATIC
     src/locking/lock_table.cpp
     src/nlm/nlm_server.cpp
     src/nsm/nsm_client.cpp
+    src/rpc/rpc_tls.cpp
 )
 target_include_directories(nfs_lib PUBLIC src)
 target_compile_options(nfs_lib PRIVATE -Wall -Wextra -Wpedantic)
+
+find_package(OpenSSL REQUIRED)
+target_link_libraries(nfs_lib PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
 add_executable(nfsd src/main.cpp)
 target_link_libraries(nfsd PRIVATE nfs_lib pthread)

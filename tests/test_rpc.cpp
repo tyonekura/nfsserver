@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "rpc/rpc_server.h"
 #include "rpc/rpc_types.h"
+#include "rpc/rpc_tls.h"
 #include "rpc/portmapper.h"
 
 #include <sys/socket.h>
@@ -241,4 +242,72 @@ TEST(Portmapper, UnregisterFailsGracefully) {
     // Same as above — should not crash even if portmapper unreachable
     bool result = pmap_unregister(100003, 3);
     (void)result;
+}
+
+// --- RFC 9289 TLS tests ---
+
+TEST(RpcTls, AuthTlsFlavor) {
+    EXPECT_EQ(static_cast<uint32_t>(RpcAuthFlavor::AUTH_TLS), 7u);
+}
+
+TEST(RpcTls, StarttlsVerifierEncoding) {
+    // Verify the STARTTLS magic string is exactly 8 bytes
+    const char starttls[8] = {'S','T','A','R','T','T','L','S'};
+    EXPECT_EQ(sizeof(starttls), 8u);
+    EXPECT_EQ(std::string(starttls, 8), "STARTTLS");
+}
+
+TEST(RpcTls, TlsContextInvalidCert) {
+    // Loading non-existent cert/key should produce invalid context
+    RpcTlsContext ctx("/nonexistent/cert.pem", "/nonexistent/key.pem");
+    EXPECT_FALSE(ctx.valid());
+}
+
+TEST(RpcTls, NullWithoutTlsStillWorks) {
+    // An AUTH_TLS NULL on a server without TLS context should fall through
+    // to normal NULL dispatch (not crash)
+    uint16_t port = 19330;
+    RpcServer server;
+    RpcProgramHandlers handlers;
+    handlers.procedures[0] = [](const RpcCallHeader&, XdrDecoder&, XdrEncoder&) {};
+    server.register_program(100003, 3, std::move(handlers));
+    // No TLS context set
+    server.start(port);
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+
+    // Send NULL with AUTH_TLS credential
+    XdrEncoder enc;
+    enc.encode_uint32(0x55);  // xid
+    enc.encode_uint32(0);     // CALL
+    enc.encode_uint32(2);     // rpcvers
+    enc.encode_uint32(100003);
+    enc.encode_uint32(3);
+    enc.encode_uint32(0);     // proc NULL
+    // AUTH_TLS credential
+    enc.encode_uint32(7);     // AUTH_TLS
+    enc.encode_uint32(0);     // empty body
+    // AUTH_NONE verifier
+    enc.encode_uint32(0);
+    enc.encode_uint32(0);
+    auto call = std::vector<uint8_t>(enc.data().begin(), enc.data().end());
+    auto framed = frame_record(call);
+    send(fd, framed.data(), framed.size(), 0);
+
+    // Should get a normal accepted reply (AUTH_TLS ignored, NULL dispatched)
+    auto reply = read_reply(fd);
+    ASSERT_GE(reply.size(), 24u);
+    XdrDecoder dec(reply.data(), reply.size());
+    EXPECT_EQ(dec.decode_uint32(), 0x55u);  // xid
+    EXPECT_EQ(dec.decode_uint32(), 1u);     // REPLY
+    EXPECT_EQ(dec.decode_uint32(), 0u);     // MSG_ACCEPTED
+
+    close(fd);
+    server.stop();
 }

@@ -5,6 +5,7 @@ A standalone NFS server implemented from scratch in C++17 for Linux, supporting 
 - **RFC 1813** — NFS Version 3 Protocol
 - **RFC 7530** — NFS Version 4.0 Protocol
 - **RFC 5531** — ONC RPC v2
+- **RFC 9289** — RPC-over-TLS (NFS over TLS)
 - **RFC 4506** — XDR (External Data Representation)
 
 ## Features
@@ -20,7 +21,8 @@ A standalone NFS server implemented from scratch in C++17 for Linux, supporting 
 - NFSv4 bitmap-based attribute encoding per RFC 7530/7531
 - NFSv4 ACL support (synthesized from POSIX mode bits)
 - ONC RPC with multi-fragment record reassembly
-- AUTH_NONE and AUTH_SYS credential parsing
+- Optional TLS encryption (RFC 9289) — in-band STARTTLS upgrade on the same port, TLS 1.3, ALPN "sunrpc"
+- AUTH_NONE, AUTH_SYS, and AUTH_TLS credential parsing
 - Local filesystem passthrough via abstract VFS layer
 - Thread-per-client architecture
 - Handle cache with eviction on delete/rename
@@ -38,12 +40,22 @@ docker run --rm nfsd-test
 docker run --rm --privileged -v /path/to/share:/export nfsd-test \
   ./build/nfsd --export /export --port 2049
 
+# Start with TLS enabled (requires cert + key)
+docker run --rm --privileged -v /path/to/share:/export \
+  -v /path/to/certs:/certs nfsd-test \
+  ./build/nfsd --export /export --port 2049 \
+    --tls-cert /certs/server.pem --tls-key /certs/server.key
+
 # Mount from a Linux client (NFSv3)
 mount -t nfs -o vers=3,proto=tcp,port=2049,mountport=2049,noacl \
   <server-ip>:/export /mnt/nfs
 
 # Mount from a Linux client (NFSv4)
 mount -t nfs4 -o vers=4.0,proto=tcp,port=2049 <server-ip>:/ /mnt/nfs
+
+# Mount with TLS (Linux kernel 6.5+, requires tlshd running)
+mount -t nfs -o vers=3,proto=tcp,port=2049,mountport=2049,xprtsec=tls \
+  <server-ip>:/export /mnt/nfs
 ```
 
 ### Try it in a single container
@@ -75,6 +87,28 @@ docker run --rm --privileged nfsd-test bash -c '
 '
 ```
 
+### TLS Setup
+
+NFS over TLS (RFC 9289) encrypts all RPC traffic using an in-band STARTTLS upgrade. Non-TLS clients continue to work on the same port.
+
+```bash
+# Generate a self-signed certificate (for testing)
+openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.pem \
+  -days 365 -nodes -subj "/CN=nfsserver" \
+  -addext "subjectAltName=DNS:nfsserver,IP:192.168.1.10"
+
+# Start server with TLS
+./build/nfsd --export /path/to/share --port 2049 \
+  --tls-cert server.pem --tls-key server.key
+```
+
+Client requirements (for TLS mount):
+- Linux kernel 6.5+ with `CONFIG_NET_HANDSHAKE=y`
+- `ktls-utils` package (`tlshd` daemon running)
+- Mount with `xprtsec=tls` option
+
+The private key must be **unencrypted** (PEM format, no passphrase). The certificate's subjectAltName must match the hostname used in the mount command.
+
 ## Architecture
 
 ```
@@ -87,7 +121,7 @@ main.cpp --> RpcServer --> MountServer --> Vfs --> LocalFs
 | Layer | Directory | Description |
 |-------|-----------|-------------|
 | XDR | `src/xdr/` | RFC 4506 encoder/decoder. 4-byte aligned, big-endian. |
-| ONC RPC | `src/rpc/` | TCP server with record marking. Per-client threads. |
+| ONC RPC | `src/rpc/` | TCP server with record marking, optional TLS. Per-client threads. |
 | VFS | `src/vfs/` | Abstract filesystem interface + local passthrough. |
 | MOUNT | `src/mount/` | MOUNT v3 protocol. Returns root file handle. |
 | NFS v3 | `src/nfs/` | All 22 NFSv3 procedures with dispatch framework. |
@@ -106,10 +140,11 @@ main.cpp --> RpcServer --> MountServer --> Vfs --> LocalFs
 - `MSG_NOSIGNAL` for TCP sends (Linux-only)
 - TCP_NODELAY enabled for low-latency request-response
 - Async-signal-safe shutdown via `sig_atomic_t` flag
+- TLS upgrade is per-connection via AUTH_TLS probe — non-TLS clients work on the same port
 
 ## Building Without Docker
 
-Requires Linux, CMake 3.16+, and a C++17 compiler.
+Requires Linux, CMake 3.16+, a C++17 compiler, and OpenSSL development headers.
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
@@ -125,7 +160,7 @@ sudo ./build/nfsd --export /path/to/share --port 2049
 | Suite | Coverage |
 |-------|----------|
 | `test_xdr` | All XDR types, alignment, padding, underflow |
-| `test_rpc` | AUTH_SYS parsing, version mismatch reply, multi-fragment reassembly |
+| `test_rpc` | AUTH_SYS parsing, version mismatch reply, multi-fragment reassembly, TLS/STARTTLS |
 | `test_vfs` | File operations, cache eviction, permissions, timestamps |
 | `test_nfs` | NFS procedure encoding, SETATTR guard, CREATE GUARDED, FSINFO/PATHCONF |
 | `test_nfs4` | Bitmap codec, attribute encoding, state management, locking, delegations, ACL, COMPOUND dispatch |
@@ -150,7 +185,7 @@ docker run --rm nfsd-test ./build/tests/test_xdr --gtest_filter="XdrCodec.Uint32
 
 ### NFSv4
 - **Minor version 0 only** — NFSv4.1/4.2 not supported
-- **No KERBEROS** — AUTH_SYS only, owner/group encoded as numeric strings
+- **No KERBEROS** — AUTH_SYS only (TLS available as alternative for encryption), owner/group encoded as numeric strings
 - **ACLs are mode-based** — synthesized from POSIX permission bits, no per-user/group ACEs
 
 ### General

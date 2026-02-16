@@ -16,6 +16,7 @@ enum class RpcMsgType : uint32_t {
 enum class RpcAuthFlavor : uint32_t {
     AUTH_NONE = 0,   // RFC 5531 §8.2.1
     AUTH_SYS  = 1,   // RFC 5531 §8.2.2
+    AUTH_TLS  = 7,   // RFC 9289 §4.1
 };
 
 // RFC 5531 §7.2 - reply_stat

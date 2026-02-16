@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     git \
     nfs-common \
     rpcbind \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
