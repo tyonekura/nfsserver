@@ -7,8 +7,9 @@
 
 constexpr uint32_t PMAP_PROGRAM = 100000;
 constexpr uint32_t PMAP_VERSION = 2;
-constexpr uint32_t PMAPPROC_SET   = 1;
-constexpr uint32_t PMAPPROC_UNSET = 2;
+constexpr uint32_t PMAPPROC_SET    = 1;
+constexpr uint32_t PMAPPROC_UNSET  = 2;
+constexpr uint32_t PMAPPROC_GETPORT = 3;
 constexpr uint32_t IPPROTO_TCP_PMAP = 6;
 
 // Register a single RPC program/version with portmapper.
@@ -23,3 +24,7 @@ void pmap_register_all(uint16_t port);
 
 // Unregister all NFS server programs.
 void pmap_unregister_all();
+
+// Look up the port for an RPC program/version via portmapper.
+// Returns 0 if not found or portmapper unreachable.
+uint16_t pmap_getport(uint32_t program, uint32_t version);

@@ -1,7 +1,9 @@
 #include "nfs4/nfs4_state.h"
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 #include <random>
+#include <sstream>
 #include <thread>
 
 // RFC 7530 - NFSv4 state management
@@ -47,7 +49,13 @@ void Nfs4StateManager::expire_clients() {
                 [cid](const Nfs4DelegState& ds) { return ds.clientid == cid; }),
             deleg_states_.end());
 
-        // Remove all lock state for this client
+        // Release locks from shared table and remove lock state for this client
+        for (const auto& ls : lock_states_) {
+            if (ls.clientid == cid) {
+                LockOwnerKey key = make_lock_key(ls.lock_owner);
+                lock_table_.release_all(key);
+            }
+        }
         lock_states_.erase(
             std::remove_if(lock_states_.begin(), lock_states_.end(),
                 [cid](const Nfs4LockState& ls) { return ls.clientid == cid; }),
@@ -323,11 +331,12 @@ Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
     if (seqid != it->open_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
-    // RFC 7530 §9.1.4.4 - Check for held locks
+    // RFC 7530 §9.1.4.4 - Check for held locks via shared lock table
     for (const auto& ls : lock_states_) {
-        if (std::memcmp(ls.open_stateid_other, it->stateid.other, 12) == 0 &&
-            !ls.ranges.empty()) {
-            return Nfs4Stat::NFS4ERR_LOCKS_HELD;
+        if (std::memcmp(ls.open_stateid_other, it->stateid.other, 12) == 0) {
+            LockOwnerKey key = make_lock_key(ls.lock_owner);
+            if (lock_table_.has_locks(ls.fh, key))
+                return Nfs4Stat::NFS4ERR_LOCKS_HELD;
         }
     }
 
@@ -335,7 +344,13 @@ Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
     out_stateid = it->stateid;
     out_stateid.seqid = UINT32_MAX;
 
-    // Remove lock states associated with this open (empty ones)
+    // Remove lock states associated with this open (and their shared table entries)
+    for (const auto& ls : lock_states_) {
+        if (std::memcmp(ls.open_stateid_other, it->stateid.other, 12) == 0) {
+            LockOwnerKey key = make_lock_key(ls.lock_owner);
+            lock_table_.release_all_for_file(ls.fh, key);
+        }
+    }
     lock_states_.erase(
         std::remove_if(lock_states_.begin(), lock_states_.end(),
             [&](const Nfs4LockState& ls) {
@@ -445,66 +460,42 @@ Nfs4LockState* Nfs4StateManager::find_lock_state_by_owner(
     return nullptr;
 }
 
-static bool ranges_overlap(uint64_t o1, uint64_t l1, uint64_t o2, uint64_t l2) {
-    uint64_t end1 = (l1 == UINT64_MAX) ? UINT64_MAX : o1 + l1;
-    uint64_t end2 = (l2 == UINT64_MAX) ? UINT64_MAX : o2 + l2;
-    return o1 < end2 && o2 < end1;
+// Build a unique lock key for the shared lock table from an NFSv4 lock owner
+LockOwnerKey Nfs4StateManager::make_lock_key(const Nfs4LockOwner& owner) {
+    std::ostringstream oss;
+    oss << "v4:" << owner.clientid << ":";
+    for (auto b : owner.owner)
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    return oss.str();
 }
 
-bool Nfs4StateManager::check_lock_conflict(const FileHandle& fh,
-                                            const Nfs4LockOwner& requester,
-                                            uint32_t locktype,
-                                            uint64_t offset, uint64_t length,
-                                            Nfs4LockDenied& denied) {
-    for (const auto& ls : lock_states_) {
-        if (!(ls.fh == fh)) continue;
-        if (ls.lock_owner == requester) continue;  // same owner never conflicts
-        for (const auto& r : ls.ranges) {
-            // READ-READ is compatible; anything with WRITE conflicts
-            if (locktype == READ_LT && r.locktype == READ_LT) continue;
-            if (ranges_overlap(offset, length, r.offset, r.length)) {
-                denied.offset = r.offset;
-                denied.length = r.length;
-                denied.locktype = r.locktype;
-                denied.owner = ls.lock_owner;
-                return true;
+// Helper: check conflict via shared lock table, fill Nfs4LockDenied on conflict.
+// If lock_states is provided, maps the conflicting owner key back to Nfs4LockOwner.
+static bool check_lock_conflict_v4(ByteRangeLockTable& table,
+                                    const FileHandle& fh,
+                                    const LockOwnerKey& requester_key,
+                                    uint32_t locktype,
+                                    uint64_t offset, uint64_t length,
+                                    Nfs4LockDenied& denied,
+                                    const std::vector<Nfs4LockState>* lock_states = nullptr) {
+    LockConflict conflict;
+    bool exclusive = (locktype == WRITE_LT || locktype == WRITEW_LT);
+    if (table.test(fh, requester_key, exclusive, offset, length, conflict)) {
+        denied.offset = conflict.offset;
+        denied.length = conflict.length;
+        denied.locktype = conflict.exclusive ? WRITE_LT : READ_LT;
+        // Map string key back to Nfs4LockOwner if possible
+        if (lock_states) {
+            for (const auto& ls : *lock_states) {
+                if (Nfs4StateManager::make_lock_key(ls.lock_owner) == conflict.owner) {
+                    denied.owner = ls.lock_owner;
+                    break;
+                }
             }
         }
+        return true;
     }
     return false;
-}
-
-void Nfs4StateManager::remove_lock_range(Nfs4LockState& ls,
-                                          uint64_t offset, uint64_t length) {
-    uint64_t rem_end = (length == UINT64_MAX) ? UINT64_MAX : offset + length;
-    std::vector<Nfs4LockRange> new_ranges;
-
-    for (const auto& r : ls.ranges) {
-        uint64_t r_end = (r.length == UINT64_MAX) ? UINT64_MAX : r.offset + r.length;
-
-        if (!ranges_overlap(offset, length, r.offset, r.length)) {
-            // No overlap — keep as-is
-            new_ranges.push_back(r);
-            continue;
-        }
-
-        // Left remnant: range starts before removal window
-        if (r.offset < offset) {
-            Nfs4LockRange left = r;
-            left.length = offset - r.offset;
-            new_ranges.push_back(left);
-        }
-
-        // Right remnant: range extends past removal window
-        if (r_end > rem_end && rem_end != UINT64_MAX) {
-            Nfs4LockRange right = r;
-            right.offset = rem_end;
-            right.length = (r.length == UINT64_MAX) ? UINT64_MAX : r_end - rem_end;
-            new_ranges.push_back(right);
-        }
-    }
-
-    ls.ranges = std::move(new_ranges);
 }
 
 // RFC 7530 §16.10 - LOCK (new lock_owner)
@@ -532,9 +523,15 @@ Nfs4Stat Nfs4StateManager::lock_new(uint64_t clientid,
     os->open_seqid = open_seqid;
     os->stateid.seqid++;
 
-    // Check for conflicts
-    if (check_lock_conflict(fh, lock_owner, locktype, offset, length, denied))
+    // Check for conflicts via shared lock table
+    LockOwnerKey lock_key = make_lock_key(lock_owner);
+    if (check_lock_conflict_v4(lock_table_, fh, lock_key, locktype, offset, length, denied, &lock_states_))
         return Nfs4Stat::NFS4ERR_DENIED;
+
+    // Acquire in shared lock table
+    bool exclusive = (locktype == WRITE_LT || locktype == WRITEW_LT);
+    LockConflict conflict;
+    lock_table_.acquire(fh, lock_key, exclusive, offset, length, conflict);
 
     // Find or create lock state for this owner+fh
     auto* ls = find_lock_state_by_owner(lock_owner, fh);
@@ -583,9 +580,15 @@ Nfs4Stat Nfs4StateManager::lock_existing(const Nfs4StateId& lock_stateid,
     if (lock_seqid != ls->lock_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
-    // Check for conflicts
-    if (check_lock_conflict(ls->fh, ls->lock_owner, locktype, offset, length, denied))
+    // Check for conflicts via shared lock table
+    LockOwnerKey lock_key = make_lock_key(ls->lock_owner);
+    if (check_lock_conflict_v4(lock_table_, ls->fh, lock_key, locktype, offset, length, denied, &lock_states_))
         return Nfs4Stat::NFS4ERR_DENIED;
+
+    // Acquire in shared lock table
+    bool exclusive = (locktype == WRITE_LT || locktype == WRITEW_LT);
+    LockConflict conflict;
+    lock_table_.acquire(ls->fh, lock_key, exclusive, offset, length, conflict);
 
     ls->ranges.push_back({offset, length, locktype});
     ls->lock_seqid = lock_seqid;
@@ -608,7 +611,8 @@ Nfs4Stat Nfs4StateManager::lock_test(const FileHandle& fh,
                                        Nfs4LockDenied& denied) {
     std::lock_guard<std::mutex> lk(mu_);
 
-    if (check_lock_conflict(fh, lock_owner, locktype, offset, length, denied))
+    LockOwnerKey lock_key = make_lock_key(lock_owner);
+    if (check_lock_conflict_v4(lock_table_, fh, lock_key, locktype, offset, length, denied, &lock_states_))
         return Nfs4Stat::NFS4ERR_DENIED;
 
     return Nfs4Stat::NFS4_OK;
@@ -627,7 +631,10 @@ Nfs4Stat Nfs4StateManager::lock_unlock(const Nfs4StateId& lock_stateid,
     if (seqid != ls->lock_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
-    remove_lock_range(*ls, offset, length);
+    // Release from shared lock table
+    LockOwnerKey lock_key = make_lock_key(ls->lock_owner);
+    lock_table_.release(ls->fh, lock_key, offset, length);
+
     ls->lock_seqid = seqid;
     ls->stateid.seqid++;
     out_stateid = ls->stateid;
@@ -643,6 +650,10 @@ Nfs4Stat Nfs4StateManager::lock_unlock(const Nfs4StateId& lock_stateid,
 // RFC 7530 §16.26 - RELEASE_LOCKOWNER
 Nfs4Stat Nfs4StateManager::release_lock_owner(const Nfs4LockOwner& lock_owner) {
     std::lock_guard<std::mutex> lk(mu_);
+
+    // Release from shared lock table
+    LockOwnerKey lock_key = make_lock_key(lock_owner);
+    lock_table_.release_all(lock_key);
 
     lock_states_.erase(
         std::remove_if(lock_states_.begin(), lock_states_.end(),

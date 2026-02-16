@@ -28,6 +28,10 @@ public:
 
     RpcProgramHandlers get_handlers();
 
+    // Access to shared lock table and its mutex (for NLM cross-protocol locking)
+    ByteRangeLockTable& lock_table() { return state_.lock_table(); }
+    std::mutex& lock_mutex() { return state_.lock_mutex(); }
+
 private:
     // RFC 7530 §16.1 - Procedure 0: NULL
     void proc_null(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply);

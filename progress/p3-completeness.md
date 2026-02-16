@@ -18,3 +18,5 @@
 | 27 | FS_LOCATIONS attribute | Pending |
 | 28 | Quota attributes | Pending |
 | 29 | ACLSUPPORT attribute | Done |
+| 30 | NLM4 — Network Lock Manager | Done |
+| 31 | NSM integration for NLM | Done |

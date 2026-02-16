@@ -11,6 +11,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include "locking/lock_table.h"
 
 // RFC 7530 §3.2 - NFSv4 client and open state management
 
@@ -183,6 +184,15 @@ public:
     bool in_grace_period();
     void end_grace_period();
 
+    // Shared lock table (used by both NFSv4 and NLM)
+    ByteRangeLockTable& lock_table() { return lock_table_; }
+
+    // Expose lock mutex for cross-protocol synchronization (NLM)
+    std::mutex& lock_mutex() { return mu_; }
+
+    // Build a lock owner key for the shared table
+    static LockOwnerKey make_lock_key(const Nfs4LockOwner& owner);
+
 private:
     // Lookup open state by stateid.other bytes
     Nfs4OpenState* find_open_state(const Nfs4StateId& sid);
@@ -190,10 +200,6 @@ private:
     // Lookup lock state by stateid.other bytes
     Nfs4LockState* find_lock_state(const Nfs4StateId& sid);
     Nfs4LockState* find_lock_state_by_owner(const Nfs4LockOwner& owner, const FileHandle& fh);
-    bool check_lock_conflict(const FileHandle& fh, const Nfs4LockOwner& requester,
-                             uint32_t locktype, uint64_t offset, uint64_t length,
-                             Nfs4LockDenied& denied);
-    void remove_lock_range(Nfs4LockState& ls, uint64_t offset, uint64_t length);
 
     // Generate a unique stateid.other
     void gen_stateid_other(uint8_t out[12]);
@@ -210,6 +216,7 @@ private:
     std::vector<Nfs4OpenState> open_states_;
     std::vector<Nfs4LockState> lock_states_;
     std::vector<Nfs4DelegState> deleg_states_;
+    ByteRangeLockTable lock_table_;
 
     // Find delegation state by stateid.other
     Nfs4DelegState* find_deleg_state(const Nfs4StateId& sid);

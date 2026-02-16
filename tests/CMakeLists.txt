@@ -25,3 +25,11 @@ add_test(NAME test_vfs COMMAND test_vfs)
 add_executable(test_nfs4 test_nfs4.cpp)
 target_link_libraries(test_nfs4 PRIVATE nfs_lib GTest::gtest_main)
 add_test(NAME test_nfs4 COMMAND test_nfs4)
+
+add_executable(test_locking test_locking.cpp)
+target_link_libraries(test_locking PRIVATE nfs_lib GTest::gtest_main)
+add_test(NAME test_locking COMMAND test_locking)
+
+add_executable(test_nlm test_nlm.cpp)
+target_link_libraries(test_nlm PRIVATE nfs_lib GTest::gtest_main)
+add_test(NAME test_nlm COMMAND test_nlm)

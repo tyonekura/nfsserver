@@ -18,6 +18,9 @@ add_library(nfs_lib STATIC
     src/nfs4/nfs4_state.cpp
     src/nfs4/nfs4_server.cpp
     src/nfs4/nfs4_callback.cpp
+    src/locking/lock_table.cpp
+    src/nlm/nlm_server.cpp
+    src/nsm/nsm_client.cpp
 )
 target_include_directories(nfs_lib PUBLIC src)
 target_compile_options(nfs_lib PRIVATE -Wall -Wextra -Wpedantic)

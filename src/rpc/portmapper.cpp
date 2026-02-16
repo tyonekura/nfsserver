@@ -1,6 +1,7 @@
 #include "rpc/portmapper.h"
 #include "rpc/rpc_types.h"
 #include "nfs4/nfs4_types.h"
+#include "nlm/nlm_types.h"
 #include "xdr/xdr_codec.h"
 
 #include <arpa/inet.h>
@@ -150,6 +151,7 @@ void pmap_register_all(uint16_t port) {
         {NFS_PROGRAM,   NFS_V3,    "NFS v3"},
         {NFS_PROGRAM,   NFS_V4,    "NFS v4"},
         {MOUNT_PROGRAM, MOUNT_V3,  "MOUNT v3"},
+        {NLM_PROGRAM,   NLM_V4,    "NLM v4"},
     };
 
     // Retry a few times in case rpcbind is still starting
@@ -182,9 +184,48 @@ void pmap_unregister_all() {
         {NFS_PROGRAM,   NFS_V3},
         {NFS_PROGRAM,   NFS_V4},
         {MOUNT_PROGRAM, MOUNT_V3},
+        {NLM_PROGRAM,   NLM_V4},
     };
 
     for (const auto& e : entries) {
         pmap_unregister(e.prog, e.ver);
     }
+}
+
+uint16_t pmap_getport(uint32_t program, uint32_t version) {
+    int fd = connect_portmapper(2);
+    if (fd < 0) return 0;
+
+    XdrEncoder enc;
+    static uint32_t xid = 100;
+    encode_rpc_call(enc, xid++, PMAP_PROGRAM, PMAP_VERSION, PMAPPROC_GETPORT);
+
+    // mapping: {program, version, protocol, port(ignored)}
+    enc.encode_uint32(program);
+    enc.encode_uint32(version);
+    enc.encode_uint32(IPPROTO_TCP_PMAP);
+    enc.encode_uint32(0);
+
+    bool ok = send_record(fd, enc.data().data(), enc.size());
+    if (!ok) { close(fd); return 0; }
+
+    std::vector<uint8_t> reply;
+    ok = recv_record(fd, reply);
+    close(fd);
+
+    if (!ok || reply.size() < 28) return 0;
+
+    XdrDecoder dec(reply.data(), reply.size());
+    dec.decode_uint32();  // xid
+    uint32_t msg_type = dec.decode_uint32();
+    if (msg_type != 1) return 0;
+    uint32_t reply_stat = dec.decode_uint32();
+    if (reply_stat != 0) return 0;
+    dec.decode_uint32();  // verf flavor
+    dec.decode_opaque();  // verf data
+    uint32_t accept_stat = dec.decode_uint32();
+    if (accept_stat != 0) return 0;
+
+    uint32_t port = dec.decode_uint32();
+    return static_cast<uint16_t>(port);
 }

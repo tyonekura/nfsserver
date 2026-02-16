@@ -8,6 +8,8 @@
 #include "mount/mount_server.h"
 #include "nfs/nfs_server.h"
 #include "nfs4/nfs4_server.h"
+#include "nlm/nlm_server.h"
+#include "nlm/nlm_types.h"
 #include "vfs/local_fs.h"
 
 #include <csignal>
@@ -69,12 +71,14 @@ int main(int argc, char* argv[]) {
         MountServer mount_srv(vfs, exports);
         NfsServer nfs_srv(vfs);
         Nfs4Server nfs4_srv(vfs, export_path);
+        NlmServer nlm_srv(nfs4_srv.lock_table(), nfs4_srv.lock_mutex());
 
         RpcServer rpc;
 
         rpc.register_program(MOUNT_PROGRAM, MOUNT_V3, mount_srv.get_handlers());
         rpc.register_program(NFS_PROGRAM, NFS_V3, nfs_srv.get_handlers());
         rpc.register_program(NFS_PROGRAM, NFS_V4, nfs4_srv.get_handlers());
+        rpc.register_program(NLM_PROGRAM, NLM_V4, nlm_srv.get_handlers());
 
         std::cout << "NFS server starting...\n"
                   << "  Export: " << export_path << "\n"
