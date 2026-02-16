@@ -6,7 +6,8 @@
 
 // RFC 7530 - NFSv4 state management
 
-Nfs4StateManager::Nfs4StateManager() {
+Nfs4StateManager::Nfs4StateManager()
+    : grace_start_(std::chrono::steady_clock::now()) {
     reaper_thread_ = std::thread(&Nfs4StateManager::reaper_loop, this);
 }
 
@@ -698,4 +699,20 @@ void Nfs4StateManager::invalidate_client_callback(uint64_t clientid) {
     auto it = clients_.find(clientid);
     if (it != clients_.end())
         it->second.cb_info.valid = false;
+}
+
+// RFC 7530 §9.14 - Grace period
+bool Nfs4StateManager::in_grace_period() {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (in_grace_period_) {
+        auto elapsed = std::chrono::steady_clock::now() - grace_start_;
+        if (elapsed > std::chrono::seconds(NFS4_LEASE_TIME))
+            in_grace_period_ = false;
+    }
+    return in_grace_period_;
+}
+
+void Nfs4StateManager::end_grace_period() {
+    std::lock_guard<std::mutex> lk(mu_);
+    in_grace_period_ = false;
 }

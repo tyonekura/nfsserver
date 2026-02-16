@@ -65,6 +65,7 @@ private:
     Nfs4Stat op_renew(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_restorefh(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_savefh(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_secinfo(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_setattr(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_setclientid(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_setclientid_confirm(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);

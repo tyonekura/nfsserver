@@ -7,12 +7,14 @@
 #include "xdr/xdr_codec.h"
 
 // Helper: call open_file with delegation out-params (ignoring them)
+// Also ends grace period so tests that don't care about it work normally.
 static Nfs4Stat open_file_simple(Nfs4StateManager& mgr, uint64_t clientid,
                                   const std::vector<uint8_t>& owner,
                                   uint32_t seqid, const FileHandle& fh,
                                   uint32_t access, uint32_t deny,
                                   Nfs4StateId& out_stateid,
                                   bool& needs_confirm) {
+    mgr.end_grace_period();
     uint32_t deleg_type = OPEN_DELEGATE_NONE;
     Nfs4StateId deleg_sid;
     Nfs4CallbackInfo recall_cb;
@@ -571,6 +573,7 @@ static uint64_t setup_client_no_cb(Nfs4StateManager& mgr,
 
 TEST(Nfs4Deleg, GrantReadDelegation) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_with_cb(mgr);
 
     FileHandle fh; fh.len = 16; fh.data[0] = 1;
@@ -594,6 +597,7 @@ TEST(Nfs4Deleg, GrantReadDelegation) {
 
 TEST(Nfs4Deleg, GrantWriteDelegation) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_with_cb(mgr);
 
     FileHandle fh; fh.len = 16; fh.data[0] = 1;
@@ -616,6 +620,7 @@ TEST(Nfs4Deleg, GrantWriteDelegation) {
 
 TEST(Nfs4Deleg, NoGrantWithoutCallback) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_no_cb(mgr, {1});
 
     FileHandle fh; fh.len = 16; fh.data[0] = 1;
@@ -637,6 +642,7 @@ TEST(Nfs4Deleg, NoGrantWithoutCallback) {
 
 TEST(Nfs4Deleg, NoGrantOtherClientOpen) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t client1 = setup_client_with_cb(mgr);
     uint64_t client2 = setup_client_no_cb(mgr, {2});
 
@@ -668,6 +674,7 @@ TEST(Nfs4Deleg, NoGrantOtherClientOpen) {
 
 TEST(Nfs4Deleg, DelegReturn) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_with_cb(mgr);
 
     FileHandle fh; fh.len = 16; fh.data[0] = 1;
@@ -696,6 +703,7 @@ TEST(Nfs4Deleg, DelegReturn) {
 
 TEST(Nfs4Deleg, DelegPurge) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_with_cb(mgr);
 
     FileHandle fh; fh.len = 16; fh.data[0] = 1;
@@ -722,6 +730,7 @@ TEST(Nfs4Deleg, DelegPurge) {
 
 TEST(Nfs4Deleg, ConflictTriggerDelay) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t client1 = setup_client_with_cb(mgr);
     uint64_t client2 = setup_client_no_cb(mgr, {2});
 
@@ -767,6 +776,7 @@ TEST(Nfs4Deleg, ConflictTriggerDelay) {
 
 TEST(Nfs4Deleg, ValidateDelegStateid) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_with_cb(mgr);
 
     FileHandle fh; fh.len = 16; fh.data[0] = 1;
@@ -796,6 +806,7 @@ TEST(Nfs4Deleg, ValidateDelegStateid) {
 
 TEST(Nfs4Deleg, InvalidateClientCallback) {
     Nfs4StateManager mgr;
+    mgr.end_grace_period();
     uint64_t clientid = setup_client_with_cb(mgr);
 
     // Invalidate callback
@@ -839,4 +850,122 @@ TEST(Nfs4Compound, MinorVersionMismatch) {
     EXPECT_EQ(tag, "test");
     uint32_t mv = dec.decode_uint32();
     EXPECT_EQ(mv, 1u);
+}
+
+// --- Grace period tests ---
+
+TEST(Nfs4Grace, GracePeriodActive) {
+    Nfs4StateManager mgr;
+    EXPECT_TRUE(mgr.in_grace_period());
+}
+
+TEST(Nfs4Grace, EndGracePeriod) {
+    Nfs4StateManager mgr;
+    EXPECT_TRUE(mgr.in_grace_period());
+    mgr.end_grace_period();
+    EXPECT_FALSE(mgr.in_grace_period());
+}
+
+TEST(Nfs4Grace, ClaimNullDuringGrace) {
+    // During grace period, open_file (CLAIM_NULL semantics) should still succeed
+    // at the state manager level — the CLAIM_NULL → NFS4ERR_GRACE check is in op_open.
+    // But we can verify the state manager starts in grace period.
+    Nfs4StateManager mgr;
+    EXPECT_TRUE(mgr.in_grace_period());
+
+    // After ending grace, open should work normally
+    mgr.end_grace_period();
+    uint8_t verifier[8] = {1};
+    std::vector<uint8_t> cid = {1};
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid);
+    mgr.confirm_clientid(clientid, confirm.data());
+
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId stateid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4StateId deleg_sid;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh,
+                             OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                             stateid, needs_confirm,
+                             deleg_type, deleg_sid,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Grace, ClaimPreviousDuringGrace) {
+    // During grace period, CLAIM_PREVIOUS should be allowed.
+    // The state manager open_file doesn't know about claim types —
+    // the server checks grace period and calls open_file.
+    // Here we verify the grace period flag works correctly.
+    Nfs4StateManager mgr;
+    EXPECT_TRUE(mgr.in_grace_period());
+
+    // Set up client during grace (SETCLIENTID is allowed during grace)
+    uint8_t verifier[8] = {1};
+    std::vector<uint8_t> cid = {1};
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid);
+    mgr.confirm_clientid(clientid, confirm.data());
+
+    // open_file works at state manager level even during grace
+    // (the grace check is at the server level per claim type)
+    FileHandle fh; fh.len = 16; fh.data[0] = 1;
+    std::vector<uint8_t> owner = {1};
+    Nfs4StateId stateid;
+    bool needs_confirm;
+    uint32_t deleg_type;
+    Nfs4StateId deleg_sid;
+    Nfs4CallbackInfo recall_cb;
+    Nfs4StateId recall_sid;
+    FileHandle recall_fh;
+
+    EXPECT_EQ(mgr.open_file(clientid, owner, 1, fh,
+                             OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE,
+                             stateid, needs_confirm,
+                             deleg_type, deleg_sid,
+                             recall_cb, recall_sid, recall_fh),
+              Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Grace, ClaimPreviousAfterGrace) {
+    // After grace period ends, in_grace_period() returns false
+    Nfs4StateManager mgr;
+    mgr.end_grace_period();
+    EXPECT_FALSE(mgr.in_grace_period());
+}
+
+TEST(Nfs4Grace, SetclientidDuringGrace) {
+    // SETCLIENTID and CONFIRM should work during grace period
+    Nfs4StateManager mgr;
+    EXPECT_TRUE(mgr.in_grace_period());
+
+    uint8_t verifier[8] = {1};
+    std::vector<uint8_t> cid = {1};
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid);
+    EXPECT_EQ(mgr.confirm_clientid(clientid, confirm.data()), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Grace, RenewDuringGrace) {
+    // RENEW should work during grace period
+    Nfs4StateManager mgr;
+    EXPECT_TRUE(mgr.in_grace_period());
+
+    uint8_t verifier[8] = {1};
+    std::vector<uint8_t> cid = {1};
+    auto [clientid, confirm] = mgr.set_clientid(verifier, cid);
+    mgr.confirm_clientid(clientid, confirm.data());
+
+    EXPECT_EQ(mgr.renew(clientid), Nfs4Stat::NFS4_OK);
+}
+
+// --- SECINFO tests ---
+
+TEST(Nfs4Ops, SecinfoOpcode) {
+    // Verify OP_SECINFO is defined with the correct opcode value (33)
+    EXPECT_EQ(static_cast<uint32_t>(Nfs4Op::OP_SECINFO), 33u);
 }

@@ -179,6 +179,10 @@ public:
     // Invalidate callback (CB_NULL probe failed)
     void invalidate_client_callback(uint64_t clientid);
 
+    // RFC 7530 §9.14 - Grace period
+    bool in_grace_period();
+    void end_grace_period();
+
 private:
     // Lookup open state by stateid.other bytes
     Nfs4OpenState* find_open_state(const Nfs4StateId& sid);
@@ -209,6 +213,10 @@ private:
 
     // Find delegation state by stateid.other
     Nfs4DelegState* find_deleg_state(const Nfs4StateId& sid);
+
+    // RFC 7530 §9.14 - Grace period state
+    bool in_grace_period_ = true;
+    std::chrono::steady_clock::time_point grace_start_;
 
     std::atomic<bool> reaper_running_{true};
     std::thread reaper_thread_;

@@ -8,8 +8,8 @@
 | 17 | Read delegations | Done |
 | 18 | Write delegations | Done |
 | 19 | Callback channel | Done |
-| 20 | Grace period / CLAIM_PREVIOUS | Pending |
-| 21 | OP_SECINFO | Pending |
+| 20 | Grace period / CLAIM_PREVIOUS | Done |
+| 21 | OP_SECINFO | Done |
 | 22 | ACL support | Pending |
 | 23 | RPCSEC_GSS / Kerberos | Pending |
 | 24 | OP_OPENATTR | Pending |

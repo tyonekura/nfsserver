@@ -44,6 +44,7 @@ enum class Nfs4Op : uint32_t {
     OP_RENEW               = 30,
     OP_RESTOREFH           = 31,
     OP_SAVEFH              = 32,
+    OP_SECINFO             = 33,
     OP_SETATTR             = 34,
     OP_SETCLIENTID         = 35,
     OP_SETCLIENTID_CONFIRM = 36,

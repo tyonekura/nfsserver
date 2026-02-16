@@ -70,6 +70,7 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RENEW)]               = &Nfs4Server::op_renew;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RESTOREFH)]           = &Nfs4Server::op_restorefh;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SAVEFH)]              = &Nfs4Server::op_savefh;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SECINFO)]             = &Nfs4Server::op_secinfo;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETATTR)]             = &Nfs4Server::op_setattr;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETCLIENTID)]         = &Nfs4Server::op_setclientid;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SETCLIENTID_CONFIRM)] = &Nfs4Server::op_setclientid_confirm;
@@ -474,9 +475,83 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     if (claim_type == CLAIM_NULL) {
         name = args.decode_string();
         if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
+        // RFC 7530 §9.14 - Non-reclaim opens are rejected during grace period
+        if (state_.in_grace_period())
+            return Nfs4Stat::NFS4ERR_GRACE;
     } else if (claim_type == CLAIM_PREVIOUS) {
-        args.decode_uint32(); // delegate_type
-        return Nfs4Stat::NFS4ERR_NO_GRACE;
+        uint32_t prev_deleg_type = args.decode_uint32();
+        if (!state_.in_grace_period())
+            return Nfs4Stat::NFS4ERR_NO_GRACE;
+        // RFC 7530 §9.14 - Reclaim open: current_fh is the file itself
+        // The client is reclaiming state after server restart
+        // We allow the open and optionally re-grant the delegation
+        FileHandle file_fh = cs.current_fh;
+        Fattr3 file_attr;
+        NfsStat3 ls = vfs_.getattr(file_fh, file_attr);
+        if (ls != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(ls);
+
+        Nfs4StateId stateid;
+        bool needs_confirm = false;
+        uint32_t deleg_type = OPEN_DELEGATE_NONE;
+        Nfs4StateId deleg_stateid;
+        Nfs4CallbackInfo recall_cb;
+        Nfs4StateId recall_deleg_sid;
+        FileHandle recall_fh;
+
+        Nfs4Stat s = state_.open_file(clientid, owner, seqid, file_fh,
+                                       share_access, share_deny,
+                                       stateid, needs_confirm,
+                                       deleg_type, deleg_stateid,
+                                       recall_cb, recall_deleg_sid, recall_fh);
+        if (s != Nfs4Stat::NFS4_OK) return s;
+
+        // Encode OPEN4resok
+        enc.encode_uint32(stateid.seqid);
+        enc.encode_opaque_fixed(stateid.other, 12);
+
+        // change_info4 (no directory change for reclaim)
+        enc.encode_bool(false);
+        enc.encode_uint64(0);
+        enc.encode_uint64(0);
+
+        // rflags
+        uint32_t rflags = 0;
+        if (needs_confirm) rflags |= OPEN4_RESULT_CONFIRM;
+        enc.encode_uint32(rflags);
+
+        // attrset bitmap
+        std::vector<uint32_t> attrset;
+        encode_bitmap(enc, attrset);
+
+        // Re-grant delegation if client had one before
+        if (prev_deleg_type == OPEN_DELEGATE_READ || prev_deleg_type == OPEN_DELEGATE_WRITE) {
+            enc.encode_uint32(deleg_type);
+            if (deleg_type == OPEN_DELEGATE_READ) {
+                enc.encode_uint32(deleg_stateid.seqid);
+                enc.encode_opaque_fixed(deleg_stateid.other, 12);
+                enc.encode_bool(false);
+                enc.encode_uint32(0);
+                enc.encode_uint32(0);
+                enc.encode_uint32(0x00000001);
+                enc.encode_string("");
+            } else if (deleg_type == OPEN_DELEGATE_WRITE) {
+                enc.encode_uint32(deleg_stateid.seqid);
+                enc.encode_opaque_fixed(deleg_stateid.other, 12);
+                enc.encode_bool(false);
+                enc.encode_uint32(NFS_LIMIT_SIZE);
+                enc.encode_uint64(UINT64_MAX);
+                enc.encode_uint32(0);
+                enc.encode_uint32(0);
+                enc.encode_uint32(0x00000006);
+                enc.encode_string("");
+            } else {
+                // No delegation available
+            }
+        } else {
+            enc.encode_uint32(OPEN_DELEGATE_NONE);
+        }
+
+        return Nfs4Stat::NFS4_OK;
     } else if (claim_type == CLAIM_DELEGATE_CUR) {
         decode_stateid(args, deleg_cur_stateid);
         name = args.decode_string();
@@ -487,7 +562,8 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     } else if (claim_type == CLAIM_DELEGATE_PREV) {
         name = args.decode_string();
         if (!is_valid_utf8(name)) return Nfs4Stat::NFS4ERR_INVAL;
-        return Nfs4Stat::NFS4ERR_NO_GRACE;
+        // We don't support delegation recall across restarts
+        return Nfs4Stat::NFS4ERR_NOTSUPP;
     } else {
         return Nfs4Stat::NFS4ERR_NOTSUPP;
     }
@@ -662,8 +738,13 @@ Nfs4Stat Nfs4Server::op_lock(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
 
     bool new_lock_owner = args.decode_bool();
 
-    if (reclaim)
+    // RFC 7530 §9.14 - Lock reclaim only allowed during grace period
+    if (reclaim && !state_.in_grace_period())
         return Nfs4Stat::NFS4ERR_NO_GRACE;
+
+    // Non-reclaim locks are rejected during grace period
+    if (!reclaim && state_.in_grace_period())
+        return Nfs4Stat::NFS4ERR_GRACE;
 
     Nfs4StateId out_stateid;
     Nfs4LockDenied denied;
@@ -855,6 +936,29 @@ Nfs4Stat Nfs4Server::op_commit(CompoundState& cs, XdrDecoder& args, XdrEncoder& 
     if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
 
     enc.encode_uint64(write_verifier_);
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 7530 §16.29 - SECINFO
+Nfs4Stat Nfs4Server::op_secinfo(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
+
+    std::string name = args.decode_string();
+
+    // Verify the name exists in current directory
+    FileHandle out_fh;
+    Fattr3 out_attr;
+    NfsStat3 s = vfs_.lookup(cs.current_fh, name, out_fh, out_attr);
+    if (s != NfsStat3::NFS3_OK) return nfs3stat_to_nfs4stat(s);
+
+    // RFC 7530 §16.29.4 - current_fh consumed (set to empty)
+    cs.current_fh_set = false;
+
+    // Return list of supported security flavors: just AUTH_SYS
+    enc.encode_uint32(1);  // array length = 1
+    // secinfo4: flavor (AUTH_SYS=1), no RPCSEC_GSS info for non-GSS flavors
+    enc.encode_uint32(1);  // AUTH_SYS
+
     return Nfs4Stat::NFS4_OK;
 }
 
