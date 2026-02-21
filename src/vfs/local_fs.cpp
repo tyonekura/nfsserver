@@ -294,7 +294,11 @@ NfsStat3 LocalFs::remove(const FileHandle& dir_fh, const std::string& name) {
 
     if (unlink(full.c_str()) != 0) return errno_to_nfsstat();
 
-    if (have_victim) {
+    // Only evict the handle from cache when this was the last hard link
+    // (nlink == 1 before unlink means the inode is now gone).
+    // If nlink > 1, the inode survives under another name; keep the cached
+    // path so existing file handles remain valid (RFC 1813 §2.5).
+    if (have_victim && st.st_nlink == 1) {
         std::lock_guard<std::mutex> lock(mu_);
         handle_to_path_.erase(victim_fh);
     }

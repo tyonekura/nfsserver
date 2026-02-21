@@ -56,4 +56,9 @@ private:
 
     Vfs& vfs_;
     uint64_t write_verifier_ = 0; // server boot time, used for COMMIT
+
+    // EXCLUSIVE CREATE verifier map: FH → createverf3 supplied by client.
+    // Used to detect idempotent re-creation vs. conflicting duplicate (RFC 1813 §3.3.8).
+    std::mutex excl_mu_;
+    std::map<FileHandle, uint64_t> excl_verifiers_;
 };

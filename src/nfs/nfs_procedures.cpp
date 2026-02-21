@@ -1,6 +1,35 @@
 #include "nfs/nfs_server.h"
 #include "nfs/nfs_types.h"
 #include <cstring>
+#include <sys/stat.h>
+
+// Decode uid/gid from an AUTH_SYS credential body (RFC 5531 §8.2.2).
+// Returns false if the credential is absent or not AUTH_SYS.
+static bool decode_auth_sys(const RpcOpaqueAuth& cred,
+                             uint32_t& uid, uint32_t& gid) {
+    if (cred.flavor != RpcAuthFlavor::AUTH_SYS || cred.body.empty())
+        return false;
+    try {
+        XdrDecoder dec(cred.body.data(), cred.body.size());
+        dec.decode_uint32();   // stamp
+        dec.decode_string();   // machinename
+        uid = dec.decode_uint32();
+        gid = dec.decode_uint32();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Check whether a client with (uid, gid) has read permission on a file
+// with the given attributes, following standard Unix permission rules.
+static bool has_read_permission(const Fattr3& attr, uint32_t uid, uint32_t gid) {
+    if (uid == 0) return true;                                    // root bypass
+    if (attr.uid == uid && (attr.mode & S_IRUSR)) return true;   // owner
+    if (attr.gid == gid && (attr.mode & S_IRGRP)) return true;   // group
+    if (attr.mode & S_IROTH) return true;                         // other
+    return false;
+}
 
 // RFC 1813 §2.5 - Decode sattr3 (settable file attributes)
 NfsServer::Sattr3 NfsServer::decode_sattr3(XdrDecoder& args) {
@@ -122,10 +151,24 @@ void NfsServer::proc_readlink(const RpcCallHeader&, XdrDecoder& args, XdrEncoder
 }
 
 // RFC 1813 §3.3.6 Procedure 6: READ - Read from file
-void NfsServer::proc_read(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& reply) {
+void NfsServer::proc_read(const RpcCallHeader& call, XdrDecoder& args, XdrEncoder& reply) {
     FileHandle fh = decode_fh(args);
     uint64_t offset = args.decode_uint64();
     uint32_t count = args.decode_uint32();
+
+    // Enforce read permissions using the client's AUTH_SYS credentials.
+    // The server process runs as root, so the OS would not deny the open()
+    // call — we must perform the check manually (RFC 1813 §2.5).
+    uint32_t client_uid = 0, client_gid = 0;
+    if (decode_auth_sys(call.credential, client_uid, client_gid) && client_uid != 0) {
+        Fattr3 attr;
+        if (vfs_.getattr(fh, attr) == NfsStat3::NFS3_OK &&
+            !has_read_permission(attr, client_uid, client_gid)) {
+            reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_ACCES));
+            encode_post_op_attr(reply, fh);
+            return;
+        }
+    }
 
     std::vector<uint8_t> data;
     bool eof = false;
@@ -175,32 +218,60 @@ void NfsServer::proc_create(const RpcCallHeader&, XdrDecoder& args, XdrEncoder& 
     uint32_t createmode = args.decode_uint32();
 
     uint32_t mode = 0644;
+    uint64_t excl_verf = 0;
     if (createmode != EXCLUSIVE) {
         Sattr3 sa = decode_sattr3(args);
         if (sa.mode != UINT32_MAX) mode = sa.mode;
     } else {
-        // createverf3: 8 bytes (consumed but not used for now)
-        args.decode_uint64();
+        excl_verf = args.decode_uint64();  // RFC 1813 §3.3.8 - createverf3
     }
 
     Fattr3 dir_pre;
     bool have_pre = (vfs_.getattr(dir_fh, dir_pre) == NfsStat3::NFS3_OK);
 
-    // For GUARDED mode, check if file already exists
+    // GUARDED: fail if file already exists
     if (createmode == GUARDED) {
         FileHandle existing_fh;
         Fattr3 existing_attr;
-        NfsStat3 lookup_stat = vfs_.lookup(dir_fh, name, existing_fh, existing_attr);
-        if (lookup_stat == NfsStat3::NFS3_OK) {
+        if (vfs_.lookup(dir_fh, name, existing_fh, existing_attr) == NfsStat3::NFS3_OK) {
             reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_EXIST));
             encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
             return;
         }
     }
 
+    // EXCLUSIVE: compare verifier if file already exists (RFC 1813 §3.3.8)
+    if (createmode == EXCLUSIVE) {
+        FileHandle existing_fh;
+        Fattr3 existing_attr;
+        if (vfs_.lookup(dir_fh, name, existing_fh, existing_attr) == NfsStat3::NFS3_OK) {
+            std::lock_guard<std::mutex> lock(excl_mu_);
+            auto it = excl_verifiers_.find(existing_fh);
+            if (it != excl_verifiers_.end() && it->second == excl_verf) {
+                // Same verifier: idempotent re-creation, return existing handle
+                reply.encode_uint32(0u);
+                reply.encode_bool(true);
+                reply.encode_opaque(existing_fh.data, existing_fh.len);
+                reply.encode_bool(true);
+                encode_fattr3(reply, existing_attr);
+                encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
+                return;
+            }
+            // Different verifier: another client created this file
+            reply.encode_uint32(static_cast<uint32_t>(NfsStat3::NFS3ERR_EXIST));
+            encode_wcc_data(reply, dir_fh, have_pre ? &dir_pre : nullptr);
+            return;
+        }
+        mode = 0600;  // RFC 1813 recommends restrictive mode for EXCLUSIVE create
+    }
+
     FileHandle out_fh;
     Fattr3 out_attr;
     NfsStat3 status = vfs_.create(dir_fh, name, mode, out_fh, out_attr);
+    if (status == NfsStat3::NFS3_OK && createmode == EXCLUSIVE) {
+        std::lock_guard<std::mutex> lock(excl_mu_);
+        excl_verifiers_[out_fh] = excl_verf;
+    }
     reply.encode_uint32(static_cast<uint32_t>(status));
     if (status == NfsStat3::NFS3_OK) {
         reply.encode_bool(true);
