@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -52,6 +53,16 @@ enum class Nfs4Op : uint32_t {
     OP_WRITE               = 38,
     OP_RELEASE_LOCKOWNER   = 39,
     OP_ILLEGAL             = 10044,
+
+    // RFC 8881 - NFSv4.1 opcodes
+    OP_BIND_CONN_TO_SESSION = 41,
+    OP_EXCHANGE_ID          = 42,
+    OP_CREATE_SESSION       = 43,
+    OP_DESTROY_SESSION      = 44,
+    OP_FREE_STATEID         = 45,
+    OP_SEQUENCE             = 53,
+    OP_DESTROY_CLIENTID     = 57,
+    OP_RECLAIM_COMPLETE     = 58,
 };
 
 // RFC 7530 §13 - NFS4 status codes
@@ -101,6 +112,15 @@ enum class Nfs4Stat : uint32_t {
     NFS4ERR_DELAY              = 10008,
     NFS4ERR_NO_GRACE           = 10033,
     NFS4ERR_OP_ILLEGAL         = 10044,
+
+    // RFC 8881 - NFSv4.1 error codes
+    NFS4ERR_BADSESSION                = 10052,
+    NFS4ERR_BADSLOT                   = 10053,
+    NFS4ERR_BAD_HIGH_SLOT             = 10054,
+    NFS4ERR_CONN_NOT_BOUND_TO_SESSION = 10055,
+    NFS4ERR_DEADSESSION               = 10056,
+    NFS4ERR_SEQ_FALSE_RETRY           = 10060,
+    NFS4ERR_SEQ_MISORDERED            = 10063,
 };
 
 // RFC 7530 §5.8.1.2 - nfs_ftype4
@@ -266,6 +286,12 @@ struct Nfsace4 {
 
 // Lease time in seconds
 constexpr uint32_t NFS4_LEASE_TIME = 90;
+
+// RFC 8881 - NFSv4.1 session ID (16-byte opaque)
+using SessionId41 = std::array<uint8_t, 16>;
+
+// RFC 8881 §18.35 - EXCHANGE_ID flag
+constexpr uint32_t EXCHGID4_FLAG_USE_NON_PNFS = 0x00020000;
 
 // RFC 7530 §3.2 - stateid4
 struct Nfs4StateId {

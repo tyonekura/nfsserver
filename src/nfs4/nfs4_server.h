@@ -20,6 +20,10 @@ struct CompoundState {
     uint32_t uid = 0;
     uint32_t gid = 0;
     std::vector<uint32_t> gids;
+    // RFC 8881 - NFSv4.1 session context
+    uint32_t    minorversion{0};
+    bool        session_set{false};
+    SessionId41 session_id{};
 };
 
 class Nfs4Server {
@@ -79,6 +83,16 @@ private:
     Nfs4Stat op_write(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_delegreturn(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
     Nfs4Stat op_delegpurge(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+
+    // RFC 8881 - NFSv4.1 session operations
+    Nfs4Stat op_exchange_id(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_create_session(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_destroy_session(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_sequence(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_reclaim_complete(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_bind_conn_to_session(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_destroy_clientid(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
+    Nfs4Stat op_free_stateid(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc);
 
     // Helpers
     Nfs4Stat verify_common(CompoundState& cs, XdrDecoder& args, bool negate);

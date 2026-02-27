@@ -23,6 +23,15 @@ struct Nfs4Client {
     bool confirmed = false;
     std::chrono::steady_clock::time_point last_renewed;
     Nfs4CallbackInfo cb_info;          // callback channel from SETCLIENTID
+    uint32_t exchange_seqid{1};        // RFC 8881 - eir_sequenceid returned by EXCHANGE_ID
+};
+
+// RFC 8881 §2.10 - NFSv4.1 session state (single-slot, slotid=0)
+struct Nfs4Session {
+    SessionId41 sessionid{};
+    uint64_t    clientid{};
+    uint32_t    slot_seqid{0};      // last accepted sa_sequenceid for slot 0
+    uint32_t    create_sequence{};  // csa_sequence used to create this session
 };
 
 // RFC 7530 §16.10 - Lock owner identity
@@ -113,6 +122,25 @@ public:
     // RFC 7530 §16.18 - OPEN_CONFIRM
     Nfs4Stat confirm_open(const Nfs4StateId& stateid, uint32_t seqid,
                            Nfs4StateId& out_stateid);
+
+    // RFC 8881 §18.51 - auto-confirm for NFSv4.1 (no seqid validation)
+    void auto_confirm_open(const Nfs4StateId& stateid);
+
+    // RFC 8881 §18.35 - EXCHANGE_ID
+    // Returns {clientid, eir_sequenceid}
+    std::pair<uint64_t, uint32_t>
+        exchange_id41(const uint8_t verifier[8], const std::string& ownerid);
+
+    // RFC 8881 §18.36 - CREATE_SESSION
+    Nfs4Stat create_session41(uint64_t clientid, uint32_t sequence,
+                               SessionId41& out_sessionid);
+
+    // RFC 8881 §18.46 - SEQUENCE validation
+    Nfs4Stat validate_sequence41(const SessionId41& sid, uint32_t seqid,
+                                  uint32_t slotid);
+
+    // RFC 8881 §18.37 - DESTROY_SESSION
+    Nfs4Stat destroy_session41(const SessionId41& sid);
 
     // RFC 7530 §16.4 - CLOSE
     Nfs4Stat close_file(const Nfs4StateId& stateid, uint32_t seqid,
@@ -216,6 +244,7 @@ private:
     std::vector<Nfs4OpenState> open_states_;
     std::vector<Nfs4LockState> lock_states_;
     std::vector<Nfs4DelegState> deleg_states_;
+    std::map<SessionId41, Nfs4Session> sessions_;  // RFC 8881 - session state
     ByteRangeLockTable lock_table_;
 
     // Find delegation state by stateid.other

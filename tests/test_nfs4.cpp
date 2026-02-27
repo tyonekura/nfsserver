@@ -1119,3 +1119,72 @@ TEST(Nfs4Acl, DecodeSetAttrWithAcl) {
     EXPECT_EQ(sa.mode, 0755u);
     EXPECT_EQ(sa.size, UINT64_MAX);
 }
+
+// --- RFC 8881 - NFSv4.1 session state tests ---
+
+TEST(Nfs4Session, ExchangeId) {
+    Nfs4StateManager mgr;
+    uint8_t verifier[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    auto [clientid, seqid] = mgr.exchange_id41(verifier, "test-client");
+    EXPECT_NE(clientid, 0u);
+    EXPECT_EQ(seqid, 1u);
+}
+
+TEST(Nfs4Session, CreateSession) {
+    Nfs4StateManager mgr;
+    uint8_t verifier[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    auto [clientid, seqid] = mgr.exchange_id41(verifier, "test-client-cs");
+
+    SessionId41 sessionid{};
+    Nfs4Stat s = mgr.create_session41(clientid, seqid, sessionid);
+    EXPECT_EQ(s, Nfs4Stat::NFS4_OK);
+    // Session ID must be non-zero
+    bool nonzero = false;
+    for (auto b : sessionid) if (b != 0) { nonzero = true; break; }
+    EXPECT_TRUE(nonzero);
+}
+
+TEST(Nfs4Session, ValidateSequenceFirst) {
+    Nfs4StateManager mgr;
+    uint8_t verifier[8] = {};
+    auto [clientid, seqid] = mgr.exchange_id41(verifier, "test-client-vsf");
+    SessionId41 sid{};
+    ASSERT_EQ(mgr.create_session41(clientid, seqid, sid), Nfs4Stat::NFS4_OK);
+
+    // First SEQUENCE must use seqid=1
+    EXPECT_EQ(mgr.validate_sequence41(sid, 1, 0), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Session, ValidateSequenceIncrement) {
+    Nfs4StateManager mgr;
+    uint8_t verifier[8] = {};
+    auto [clientid, seqid] = mgr.exchange_id41(verifier, "test-client-vsi");
+    SessionId41 sid{};
+    ASSERT_EQ(mgr.create_session41(clientid, seqid, sid), Nfs4Stat::NFS4_OK);
+
+    EXPECT_EQ(mgr.validate_sequence41(sid, 1, 0), Nfs4Stat::NFS4_OK);
+    EXPECT_EQ(mgr.validate_sequence41(sid, 2, 0), Nfs4Stat::NFS4_OK);
+}
+
+TEST(Nfs4Session, ValidateSequenceBadSlot) {
+    Nfs4StateManager mgr;
+    uint8_t verifier[8] = {};
+    auto [clientid, seqid] = mgr.exchange_id41(verifier, "test-client-vbs");
+    SessionId41 sid{};
+    ASSERT_EQ(mgr.create_session41(clientid, seqid, sid), Nfs4Stat::NFS4_OK);
+
+    // slotid != 0 must be rejected
+    EXPECT_EQ(mgr.validate_sequence41(sid, 1, 1), Nfs4Stat::NFS4ERR_BADSLOT);
+}
+
+TEST(Nfs4Session, DestroySession) {
+    Nfs4StateManager mgr;
+    uint8_t verifier[8] = {};
+    auto [clientid, seqid] = mgr.exchange_id41(verifier, "test-client-ds");
+    SessionId41 sid{};
+    ASSERT_EQ(mgr.create_session41(clientid, seqid, sid), Nfs4Stat::NFS4_OK);
+
+    EXPECT_EQ(mgr.destroy_session41(sid), Nfs4Stat::NFS4_OK);
+    // After destroy, validate must return BADSESSION
+    EXPECT_EQ(mgr.validate_sequence41(sid, 1, 0), Nfs4Stat::NFS4ERR_BADSESSION);
+}

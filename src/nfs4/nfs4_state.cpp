@@ -712,6 +712,115 @@ void Nfs4StateManager::invalidate_client_callback(uint64_t clientid) {
         it->second.cb_info.valid = false;
 }
 
+// RFC 8881 §18.51 - Auto-confirm open for NFSv4.1 (no seqid validation)
+void Nfs4StateManager::auto_confirm_open(const Nfs4StateId& stateid) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto* os = find_open_state(stateid);
+    if (os) os->confirmed = true;
+}
+
+// RFC 8881 §18.35 - EXCHANGE_ID
+std::pair<uint64_t, uint32_t>
+Nfs4StateManager::exchange_id41(const uint8_t verifier[8], const std::string& ownerid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    std::vector<uint8_t> client_id(ownerid.begin(), ownerid.end());
+
+    auto it = client_id_to_clientid_.find(client_id);
+    if (it != client_id_to_clientid_.end()) {
+        auto& client = clients_[it->second];
+        std::memcpy(client.verifier, verifier, 8);
+        client.confirmed = true;
+        client.last_renewed = std::chrono::steady_clock::now();
+        client.exchange_seqid = 1;
+        return {client.clientid, client.exchange_seqid};
+    }
+
+    Nfs4Client c;
+    c.clientid = next_clientid_++;
+    std::memcpy(c.verifier, verifier, 8);
+    c.client_id = client_id;
+    c.confirmed = true;
+    c.last_renewed = std::chrono::steady_clock::now();
+    c.exchange_seqid = 1;
+
+    uint64_t cid = c.clientid;
+    client_id_to_clientid_[client_id] = cid;
+    clients_[cid] = std::move(c);
+    return {cid, 1};
+}
+
+// RFC 8881 §18.36 - CREATE_SESSION
+Nfs4Stat Nfs4StateManager::create_session41(uint64_t clientid, uint32_t sequence,
+                                              SessionId41& out_sessionid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto it = clients_.find(clientid);
+    if (it == clients_.end())
+        return Nfs4Stat::NFS4ERR_STALE_CLIENTID;
+
+    if (sequence != it->second.exchange_seqid)
+        return Nfs4Stat::NFS4ERR_SEQ_MISORDERED;
+
+    // Generate random 16-byte session ID
+    std::mt19937_64 rng(std::random_device{}());
+    SessionId41 sid{};
+    for (auto& b : sid)
+        b = static_cast<uint8_t>(rng());
+
+    Nfs4Session sess;
+    sess.sessionid = sid;
+    sess.clientid = clientid;
+    sess.slot_seqid = 0;
+    sess.create_sequence = sequence;
+
+    sessions_[sid] = sess;
+    out_sessionid = sid;
+
+    it->second.last_renewed = std::chrono::steady_clock::now();
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.46 - SEQUENCE validation
+Nfs4Stat Nfs4StateManager::validate_sequence41(const SessionId41& sid, uint32_t seqid,
+                                                uint32_t slotid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto it = sessions_.find(sid);
+    if (it == sessions_.end())
+        return Nfs4Stat::NFS4ERR_BADSESSION;
+
+    if (slotid != 0)
+        return Nfs4Stat::NFS4ERR_BADSLOT;
+
+    auto& sess = it->second;
+    if (seqid == sess.slot_seqid + 1) {
+        // Normal advance
+        sess.slot_seqid = seqid;
+        // Renew client lease
+        auto cit = clients_.find(sess.clientid);
+        if (cit != clients_.end())
+            cit->second.last_renewed = std::chrono::steady_clock::now();
+        return Nfs4Stat::NFS4_OK;
+    } else if (seqid == sess.slot_seqid) {
+        // Replay — accept without updating slot_seqid
+        return Nfs4Stat::NFS4_OK;
+    }
+    return Nfs4Stat::NFS4ERR_SEQ_MISORDERED;
+}
+
+// RFC 8881 §18.37 - DESTROY_SESSION
+Nfs4Stat Nfs4StateManager::destroy_session41(const SessionId41& sid) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    auto it = sessions_.find(sid);
+    if (it == sessions_.end())
+        return Nfs4Stat::NFS4ERR_BADSESSION;
+
+    sessions_.erase(it);
+    return Nfs4Stat::NFS4_OK;
+}
+
 // RFC 7530 §9.14 - Grace period
 bool Nfs4StateManager::in_grace_period() {
     std::lock_guard<std::mutex> lk(mu_);

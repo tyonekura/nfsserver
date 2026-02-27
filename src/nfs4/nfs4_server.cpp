@@ -80,6 +80,16 @@ Nfs4Server::Nfs4Server(Vfs& vfs, const std::string& export_root)
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_WRITE)]               = &Nfs4Server::op_write;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_DELEGRETURN)]         = &Nfs4Server::op_delegreturn;
     op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_DELEGPURGE)]          = &Nfs4Server::op_delegpurge;
+
+    // RFC 8881 - NFSv4.1 session operations
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_EXCHANGE_ID)]          = &Nfs4Server::op_exchange_id;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_CREATE_SESSION)]       = &Nfs4Server::op_create_session;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_DESTROY_SESSION)]      = &Nfs4Server::op_destroy_session;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_SEQUENCE)]             = &Nfs4Server::op_sequence;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_RECLAIM_COMPLETE)]     = &Nfs4Server::op_reclaim_complete;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_BIND_CONN_TO_SESSION)] = &Nfs4Server::op_bind_conn_to_session;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_DESTROY_CLIENTID)]     = &Nfs4Server::op_destroy_clientid;
+    op_handlers_[static_cast<uint32_t>(Nfs4Op::OP_FREE_STATEID)]         = &Nfs4Server::op_free_stateid;
 }
 
 RpcProgramHandlers Nfs4Server::get_handlers() {
@@ -100,7 +110,7 @@ void Nfs4Server::proc_compound(const RpcCallHeader& call, XdrDecoder& args, XdrE
     uint32_t minorversion = args.decode_uint32();
     uint32_t num_ops = args.decode_uint32();
 
-    if (minorversion != 0) {
+    if (minorversion > 1) {
         reply.encode_uint32(static_cast<uint32_t>(Nfs4Stat::NFS4ERR_MINOR_VERS_MISMATCH));
         reply.encode_string(tag);
         reply.encode_uint32(0);
@@ -108,6 +118,7 @@ void Nfs4Server::proc_compound(const RpcCallHeader& call, XdrDecoder& args, XdrE
     }
 
     CompoundState cs;
+    cs.minorversion = minorversion;
 
     // Extract AUTH_SYS credentials if present
     if (call.credential.flavor == RpcAuthFlavor::AUTH_SYS) {
@@ -126,16 +137,59 @@ void Nfs4Server::proc_compound(const RpcCallHeader& call, XdrDecoder& args, XdrE
     };
     std::vector<OpResult> results;
 
+    // RFC 8881 - ops banned in v4.1 (v4.0-only bootstrap ops)
+    static const uint32_t kBannedV41[] = {
+        20,  // OP_OPEN_CONFIRM
+        30,  // OP_RENEW
+        35,  // OP_SETCLIENTID
+        36,  // OP_SETCLIENTID_CONFIRM
+        38,  // OP_RELEASE_LOCKOWNER
+    };
+    // RFC 8881 - bootstrap ops that may appear without SEQUENCE first
+    static const uint32_t kBootstrap41[] = {
+        41,  // OP_BIND_CONN_TO_SESSION
+        42,  // OP_EXCHANGE_ID
+        43,  // OP_CREATE_SESSION
+        44,  // OP_DESTROY_SESSION
+        57,  // OP_DESTROY_CLIENTID
+    };
+    auto in_set = [](const uint32_t* arr, size_t n, uint32_t v) {
+        for (size_t j = 0; j < n; j++) if (arr[j] == v) return true;
+        return false;
+    };
+
     for (uint32_t i = 0; i < num_ops; i++) {
         uint32_t opcode = args.decode_uint32();
         XdrEncoder op_enc;
 
         auto it = op_handlers_.find(opcode);
         Nfs4Stat status;
+        bool do_call = true;
+
         if (it == op_handlers_.end()) {
             status = Nfs4Stat::NFS4ERR_OP_ILLEGAL;
             opcode = static_cast<uint32_t>(Nfs4Op::OP_ILLEGAL);
-        } else {
+            do_call = false;
+        }
+
+        // RFC 8881 §2.10 - v4.1 dispatch guard
+        if (do_call && cs.minorversion == 1) {
+            if (in_set(kBannedV41, 5, opcode)) {
+                status = Nfs4Stat::NFS4ERR_NOTSUPP;
+                do_call = false;
+            } else if (opcode == static_cast<uint32_t>(Nfs4Op::OP_SEQUENCE)) {
+                if (i != 0) {
+                    status = Nfs4Stat::NFS4ERR_OP_ILLEGAL;
+                    do_call = false;
+                }
+            } else if (!in_set(kBootstrap41, 5, opcode) && !cs.session_set) {
+                // Non-bootstrap op without a SEQUENCE — reject
+                status = Nfs4Stat::NFS4ERR_OP_ILLEGAL;
+                do_call = false;
+            }
+        }
+
+        if (do_call) {
             try {
                 status = (this->*(it->second))(cs, args, op_enc);
             } catch (const std::exception& e) {
@@ -505,6 +559,12 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
                                        recall_cb, recall_deleg_sid, recall_fh);
         if (s != Nfs4Stat::NFS4_OK) return s;
 
+        // RFC 8881 - v4.1 auto-confirm: server MUST NOT set OPEN4_RESULT_CONFIRM
+        if (needs_confirm && cs.minorversion == 1) {
+            state_.auto_confirm_open(stateid);
+            needs_confirm = false;
+        }
+
         // Encode OPEN4resok
         enc.encode_uint32(stateid.seqid);
         enc.encode_opaque_fixed(stateid.other, 12);
@@ -639,6 +699,12 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         return Nfs4Stat::NFS4ERR_DELAY;
     }
     if (s != Nfs4Stat::NFS4_OK) return s;
+
+    // RFC 8881 - v4.1 auto-confirm: server MUST NOT set OPEN4_RESULT_CONFIRM
+    if (needs_confirm && cs.minorversion == 1) {
+        state_.auto_confirm_open(stateid);
+        needs_confirm = false;
+    }
 
     // Update current FH to the opened file
     cs.current_fh = file_fh;
@@ -1179,4 +1245,177 @@ Nfs4Stat Nfs4Server::op_delegreturn(CompoundState&, XdrDecoder& args, XdrEncoder
 Nfs4Stat Nfs4Server::op_delegpurge(CompoundState&, XdrDecoder& args, XdrEncoder&) {
     uint64_t clientid = args.decode_uint64();
     return state_.delegpurge(clientid);
+}
+
+// --- RFC 8881 - NFSv4.1 session operations ---
+
+// RFC 8881 §18.35 - EXCHANGE_ID
+Nfs4Stat Nfs4Server::op_exchange_id(CompoundState&, XdrDecoder& args, XdrEncoder& enc) {
+    // eia_clientowner: co_verifier (8 bytes) + co_ownerid (opaque<>)
+    uint8_t verifier[8];
+    args.decode_opaque_fixed(verifier, 8);
+    auto ownerid_raw = args.decode_opaque();
+    std::string ownerid(ownerid_raw.begin(), ownerid_raw.end());
+
+    // eia_flags: uint32 (ignore)
+    args.decode_uint32();
+
+    // eia_state_protect: discriminant uint32 (SP4_NONE=0 has no body)
+    uint32_t sp_type = args.decode_uint32();
+    (void)sp_type;  // SP4_NONE has no additional fields
+
+    // eia_client_impl_id: uint32 count (expect 0)
+    uint32_t impl_id_count = args.decode_uint32();
+    for (uint32_t i = 0; i < impl_id_count; i++) {
+        args.decode_string();   // nii_domain
+        args.decode_string();   // nii_name
+        args.decode_uint64();   // nii_date seconds
+        args.decode_uint32();   // nii_date nseconds
+    }
+
+    auto [clientid, seqid] = state_.exchange_id41(verifier, ownerid);
+
+    // eir_clientid
+    enc.encode_uint64(clientid);
+    // eir_sequenceid
+    enc.encode_uint32(seqid);
+    // eir_flags
+    enc.encode_uint32(EXCHGID4_FLAG_USE_NON_PNFS);
+    // eir_state_protect: SP4_NONE discriminant
+    enc.encode_uint32(0);
+    // eir_server_owner: {so_minor_id=0, so_major_id=""}
+    enc.encode_uint64(0);
+    enc.encode_string("");
+    // eir_server_scope: opaque<> empty
+    enc.encode_string("");
+    // eir_server_impl_id: uint32(0) empty array
+    enc.encode_uint32(0);
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.36 - CREATE_SESSION
+Nfs4Stat Nfs4Server::op_create_session(CompoundState&, XdrDecoder& args, XdrEncoder& enc) {
+    uint64_t clientid   = args.decode_uint64();
+    uint32_t sequence   = args.decode_uint32();
+    uint32_t flags      = args.decode_uint32();
+    (void)flags;
+
+    // fore_chan_attrs: 7 uint32s + rdma_ird count
+    uint32_t fore[7];
+    for (auto& v : fore) v = args.decode_uint32();
+    uint32_t fore_rdma_count = args.decode_uint32();
+    for (uint32_t i = 0; i < fore_rdma_count; i++) args.decode_uint32();
+
+    // back_chan_attrs: same layout
+    uint32_t back[7];
+    for (auto& v : back) v = args.decode_uint32();
+    uint32_t back_rdma_count = args.decode_uint32();
+    for (uint32_t i = 0; i < back_rdma_count; i++) args.decode_uint32();
+
+    // cb_program
+    args.decode_uint32();
+
+    // csa_sec_parms: array of cb_secflavor (AUTH_NONE=0 has no body)
+    uint32_t sec_count = args.decode_uint32();
+    for (uint32_t i = 0; i < sec_count; i++) {
+        uint32_t flavor = args.decode_uint32();
+        (void)flavor;  // AUTH_NONE has no body; ignore others for simplicity
+    }
+
+    SessionId41 sessionid{};
+    Nfs4Stat s = state_.create_session41(clientid, sequence, sessionid);
+    if (s != Nfs4Stat::NFS4_OK) return s;
+
+    // csr_sessionid
+    enc.encode_opaque_fixed(sessionid.data(), 16);
+    // csr_sequence
+    enc.encode_uint32(sequence);
+    // csr_flags
+    enc.encode_uint32(0);
+    // csr_fore_chan_attrs (echo client's values)
+    for (auto v : fore) enc.encode_uint32(v);
+    enc.encode_uint32(0);  // ca_rdma_ird empty array
+    // csr_back_chan_attrs
+    for (auto v : back) enc.encode_uint32(v);
+    enc.encode_uint32(0);  // ca_rdma_ird empty array
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.46 - SEQUENCE (must be first op in v4.1 COMPOUND)
+Nfs4Stat Nfs4Server::op_sequence(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
+    SessionId41 sid{};
+    args.decode_opaque_fixed(sid.data(), 16);
+    uint32_t seqid          = args.decode_uint32();
+    uint32_t slotid         = args.decode_uint32();
+    uint32_t highest_slotid = args.decode_uint32();
+    args.decode_uint32();  // sa_cachethis (bool)
+    (void)highest_slotid;
+
+    Nfs4Stat s = state_.validate_sequence41(sid, seqid, slotid);
+    if (s != Nfs4Stat::NFS4_OK) return s;
+
+    cs.session_set = true;
+    cs.session_id  = sid;
+
+    // sr_sessionid
+    enc.encode_opaque_fixed(sid.data(), 16);
+    // sr_sequenceid
+    enc.encode_uint32(seqid);
+    // sr_slotid
+    enc.encode_uint32(slotid);
+    // sr_highest_slotid
+    enc.encode_uint32(0);
+    // sr_target_highest_slotid
+    enc.encode_uint32(0);
+    // sr_status_flags
+    enc.encode_uint32(0);
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.51 - RECLAIM_COMPLETE
+Nfs4Stat Nfs4Server::op_reclaim_complete(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    args.decode_uint32();  // rca_one_fs (bool)
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.37 - DESTROY_SESSION
+Nfs4Stat Nfs4Server::op_destroy_session(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    SessionId41 sid{};
+    args.decode_opaque_fixed(sid.data(), 16);
+    return state_.destroy_session41(sid);
+}
+
+// RFC 8881 §18.34 - BIND_CONN_TO_SESSION
+// For TCP, the connection is trivially bound; this is mainly used for RDMA.
+Nfs4Stat Nfs4Server::op_bind_conn_to_session(CompoundState&, XdrDecoder& args, XdrEncoder& enc) {
+    SessionId41 sid{};
+    args.decode_opaque_fixed(sid.data(), 16);
+    uint32_t bctsa_dir = args.decode_uint32();
+    args.decode_uint32();  // bctsa_use_conn_in_rdma_mode (bool)
+
+    // bctsr_sessionid
+    enc.encode_opaque_fixed(sid.data(), 16);
+    // bctsr_dir
+    enc.encode_uint32(bctsa_dir);
+    // bctsr_use_conn_in_rdma_mode
+    enc.encode_uint32(0);
+
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.50 - DESTROY_CLIENTID
+Nfs4Stat Nfs4Server::op_destroy_clientid(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    args.decode_uint64();  // cda_clientid (best-effort; ignore errors)
+    return Nfs4Stat::NFS4_OK;
+}
+
+// RFC 8881 §18.38 - FREE_STATEID
+Nfs4Stat Nfs4Server::op_free_stateid(CompoundState&, XdrDecoder& args, XdrEncoder&) {
+    Nfs4StateId stateid;
+    decode_stateid(args, stateid);
+    // Best-effort; state may already be gone
+    return Nfs4Stat::NFS4_OK;
 }
