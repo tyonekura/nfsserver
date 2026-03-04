@@ -219,13 +219,13 @@ Nfs4Stat Nfs4StateManager::open_file(uint64_t clientid,
     // Check if there's an existing open for same owner+fh
     for (auto& os : open_states_) {
         if (os.clientid == clientid && os.owner == owner && os.fh == fh) {
-            // RFC 7530 §8.1.5 - Sequence ID validation
-            if (seqid != os.open_seqid + 1)
+            // RFC 7530 §8.1.5 - Sequence ID validation (seqid=0 skips for NFSv4.1)
+            if (seqid != 0 && seqid != os.open_seqid + 1)
                 return Nfs4Stat::NFS4ERR_BAD_SEQID;
             // Upgrade access if needed
             os.access |= access;
             os.stateid.seqid++;
-            os.open_seqid = seqid;
+            if (seqid != 0) os.open_seqid = seqid;
             out_stateid = os.stateid;
             needs_confirm = !os.confirmed;
             cit->second.last_renewed = std::chrono::steady_clock::now();
@@ -327,8 +327,8 @@ Nfs4Stat Nfs4StateManager::close_file(const Nfs4StateId& stateid,
     if (it == open_states_.end())
         return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
-    // RFC 7530 §8.1.5 - Sequence ID validation
-    if (seqid != it->open_seqid + 1)
+    // RFC 7530 §8.1.5 - Sequence ID validation (seqid=0 skips for NFSv4.1)
+    if (seqid != 0 && seqid != it->open_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
     // RFC 7530 §9.1.4.4 - Check for held locks via shared lock table
@@ -377,7 +377,7 @@ Nfs4Stat Nfs4StateManager::open_downgrade(const Nfs4StateId& stateid,
     auto* os = find_open_state(stateid);
     if (!os) return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
-    if (seqid != os->open_seqid + 1)
+    if (seqid != 0 && seqid != os->open_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
     // New access must be a subset of current access
@@ -387,7 +387,7 @@ Nfs4Stat Nfs4StateManager::open_downgrade(const Nfs4StateId& stateid,
     os->access = access;
     os->deny = deny;
     os->stateid.seqid++;
-    os->open_seqid = seqid;
+    if (seqid != 0) os->open_seqid = seqid;
     out_stateid = os->stateid;
 
     auto cit = clients_.find(os->clientid);
@@ -515,12 +515,12 @@ Nfs4Stat Nfs4StateManager::lock_new(uint64_t clientid,
     auto* os = find_open_state(open_stateid);
     if (!os) return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
-    // Validate open_seqid
-    if (open_seqid != os->open_seqid + 1)
+    // Validate open_seqid (open_seqid=0 skips for NFSv4.1)
+    if (open_seqid != 0 && open_seqid != os->open_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
     // Bump the open seqid (consumed even on LOCK failure per RFC 7530 §8.1.5)
-    os->open_seqid = open_seqid;
+    if (open_seqid != 0) os->open_seqid = open_seqid;
     os->stateid.seqid++;
 
     // Check for conflicts via shared lock table
@@ -577,7 +577,7 @@ Nfs4Stat Nfs4StateManager::lock_existing(const Nfs4StateId& lock_stateid,
     auto* ls = find_lock_state(lock_stateid);
     if (!ls) return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
-    if (lock_seqid != ls->lock_seqid + 1)
+    if (lock_seqid != 0 && lock_seqid != ls->lock_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
     // Check for conflicts via shared lock table
@@ -591,7 +591,7 @@ Nfs4Stat Nfs4StateManager::lock_existing(const Nfs4StateId& lock_stateid,
     lock_table_.acquire(ls->fh, lock_key, exclusive, offset, length, conflict);
 
     ls->ranges.push_back({offset, length, locktype});
-    ls->lock_seqid = lock_seqid;
+    if (lock_seqid != 0) ls->lock_seqid = lock_seqid;
     ls->stateid.seqid++;
     out_stateid = ls->stateid;
 
@@ -628,14 +628,14 @@ Nfs4Stat Nfs4StateManager::lock_unlock(const Nfs4StateId& lock_stateid,
     auto* ls = find_lock_state(lock_stateid);
     if (!ls) return Nfs4Stat::NFS4ERR_BAD_STATEID;
 
-    if (seqid != ls->lock_seqid + 1)
+    if (seqid != 0 && seqid != ls->lock_seqid + 1)
         return Nfs4Stat::NFS4ERR_BAD_SEQID;
 
     // Release from shared lock table
     LockOwnerKey lock_key = make_lock_key(ls->lock_owner);
     lock_table_.release(ls->fh, lock_key, offset, length);
 
-    ls->lock_seqid = seqid;
+    if (seqid != 0) ls->lock_seqid = seqid;
     ls->stateid.seqid++;
     out_stateid = ls->stateid;
 

@@ -174,7 +174,10 @@ NfsStat3 LocalFs::lookup(const FileHandle& dir_fh, const std::string& name,
         return errno_to_nfsstat();
 
     out_fh = make_handle(st.st_ino, st.st_dev);
-    cache_path(out_fh, full);
+    // Don't cache paths with . or .. components — they become invalid after
+    // directory removal and would corrupt the handle→path mapping.
+    if (name != "." && name != "..")
+        cache_path(out_fh, full);
     out_attr = stat_to_fattr(st);
     return NfsStat3::NFS3_OK;
 }
@@ -374,8 +377,12 @@ NfsStat3 LocalFs::readdir(const FileHandle& dir_fh, uint64_t cookie,
         de.cookie = idx;
         entries.push_back(std::move(de));
 
-        // Cache the path for this entry.
-        std::string full = dir_path + "/" + ent->d_name;
+        // Cache the path for this entry (skip . and .. to avoid overwriting
+        // parent-dir cache entries with a removable-component path).
+        const char* dname = ent->d_name;
+        if (dname[0] == '.' && (dname[1] == '\0' || (dname[1] == '.' && dname[2] == '\0')))
+            continue;
+        std::string full = dir_path + "/" + dname;
         struct stat st;
         if (lstat(full.c_str(), &st) == 0) {
             auto fh = make_handle(st.st_ino, st.st_dev);

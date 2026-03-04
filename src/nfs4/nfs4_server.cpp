@@ -143,7 +143,7 @@ void Nfs4Server::proc_compound(const RpcCallHeader& call, XdrDecoder& args, XdrE
         30,  // OP_RENEW
         35,  // OP_SETCLIENTID
         36,  // OP_SETCLIENTID_CONFIRM
-        38,  // OP_RELEASE_LOCKOWNER
+        39,  // OP_RELEASE_LOCKOWNER
     };
     // RFC 8881 - bootstrap ops that may appear without SEQUENCE first
     static const uint32_t kBootstrap41[] = {
@@ -193,6 +193,7 @@ void Nfs4Server::proc_compound(const RpcCallHeader& call, XdrDecoder& args, XdrE
             try {
                 status = (this->*(it->second))(cs, args, op_enc);
             } catch (const std::exception& e) {
+                std::cerr << "[SERVERFAULT] op=" << opcode << " exception: " << e.what() << std::endl;
                 status = Nfs4Stat::NFS4ERR_SERVERFAULT;
             }
         }
@@ -499,6 +500,7 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     if (!cs.current_fh_set) return Nfs4Stat::NFS4ERR_NOFILEHANDLE;
 
     uint32_t seqid = args.decode_uint32();
+    uint32_t effective_seqid = (cs.minorversion == 1) ? 0 : seqid;
     uint32_t share_access = args.decode_uint32();
     uint32_t share_deny = args.decode_uint32();
 
@@ -552,7 +554,7 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         Nfs4StateId recall_deleg_sid;
         FileHandle recall_fh;
 
-        Nfs4Stat s = state_.open_file(clientid, owner, seqid, file_fh,
+        Nfs4Stat s = state_.open_file(clientid, owner, effective_seqid, file_fh,
                                        share_access, share_deny,
                                        stateid, needs_confirm,
                                        deleg_type, deleg_stateid,
@@ -686,7 +688,7 @@ Nfs4Stat Nfs4Server::op_open(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
     Nfs4StateId recall_deleg_sid;
     FileHandle recall_fh;
 
-    Nfs4Stat s = state_.open_file(clientid, owner, seqid, file_fh,
+    Nfs4Stat s = state_.open_file(clientid, owner, effective_seqid, file_fh,
                                    share_access, share_deny,
                                    stateid, needs_confirm,
                                    deleg_type, deleg_stateid,
@@ -829,8 +831,10 @@ Nfs4Stat Nfs4Server::op_lock(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         lo.clientid = clientid;
         lo.owner = owner;
 
-        s = state_.lock_new(clientid, open_stateid, open_seqid,
-                            lo, lock_seqid, cs.current_fh,
+        uint32_t eff_open_seqid = (cs.minorversion == 1) ? 0 : open_seqid;
+        uint32_t eff_lock_seqid = (cs.minorversion == 1) ? 0 : lock_seqid;
+        s = state_.lock_new(clientid, open_stateid, eff_open_seqid,
+                            lo, eff_lock_seqid, cs.current_fh,
                             locktype, offset, length,
                             out_stateid, denied);
     } else {
@@ -838,7 +842,8 @@ Nfs4Stat Nfs4Server::op_lock(CompoundState& cs, XdrDecoder& args, XdrEncoder& en
         decode_stateid(args, lock_stateid);
         uint32_t lock_seqid = args.decode_uint32();
 
-        s = state_.lock_existing(lock_stateid, lock_seqid,
+        uint32_t eff_lock_seqid = (cs.minorversion == 1) ? 0 : lock_seqid;
+        s = state_.lock_existing(lock_stateid, eff_lock_seqid,
                                  locktype, offset, length,
                                  out_stateid, denied);
     }
@@ -890,8 +895,9 @@ Nfs4Stat Nfs4Server::op_locku(CompoundState& cs, XdrDecoder& args, XdrEncoder& e
     uint64_t offset = args.decode_uint64();
     uint64_t length = args.decode_uint64();
 
+    uint32_t effective_seqid = (cs.minorversion == 1) ? 0 : seqid;
     Nfs4StateId out_stateid;
-    Nfs4Stat s = state_.lock_unlock(lock_stateid, seqid, offset, length, out_stateid);
+    Nfs4Stat s = state_.lock_unlock(lock_stateid, effective_seqid, offset, length, out_stateid);
     if (s != Nfs4Stat::NFS4_OK) return s;
 
     enc.encode_uint32(out_stateid.seqid);
@@ -912,15 +918,16 @@ Nfs4Stat Nfs4Server::op_release_lockowner(CompoundState&, XdrDecoder& args, XdrE
 }
 
 // RFC 7530 §16.19 - OPEN_DOWNGRADE
-Nfs4Stat Nfs4Server::op_open_downgrade(CompoundState&, XdrDecoder& args, XdrEncoder& enc) {
+Nfs4Stat Nfs4Server::op_open_downgrade(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
     Nfs4StateId stateid;
     decode_stateid(args, stateid);
     uint32_t seqid = args.decode_uint32();
+    uint32_t effective_seqid = (cs.minorversion == 1) ? 0 : seqid;
     uint32_t share_access = args.decode_uint32();
     uint32_t share_deny = args.decode_uint32();
 
     Nfs4StateId out_stateid;
-    Nfs4Stat s = state_.open_downgrade(stateid, seqid, share_access, share_deny, out_stateid);
+    Nfs4Stat s = state_.open_downgrade(stateid, effective_seqid, share_access, share_deny, out_stateid);
     if (s != Nfs4Stat::NFS4_OK) return s;
 
     enc.encode_uint32(out_stateid.seqid);
@@ -929,13 +936,14 @@ Nfs4Stat Nfs4Server::op_open_downgrade(CompoundState&, XdrDecoder& args, XdrEnco
 }
 
 // RFC 7530 §16.4 - CLOSE
-Nfs4Stat Nfs4Server::op_close(CompoundState&, XdrDecoder& args, XdrEncoder& enc) {
+Nfs4Stat Nfs4Server::op_close(CompoundState& cs, XdrDecoder& args, XdrEncoder& enc) {
     uint32_t seqid = args.decode_uint32();
     Nfs4StateId stateid;
     decode_stateid(args, stateid);
 
+    uint32_t effective_seqid = (cs.minorversion == 1) ? 0 : seqid;
     Nfs4StateId out_stateid;
-    Nfs4Stat s = state_.close_file(stateid, seqid, out_stateid);
+    Nfs4Stat s = state_.close_file(stateid, effective_seqid, out_stateid);
     if (s != Nfs4Stat::NFS4_OK) return s;
 
     enc.encode_uint32(out_stateid.seqid);
@@ -1301,14 +1309,14 @@ Nfs4Stat Nfs4Server::op_create_session(CompoundState&, XdrDecoder& args, XdrEnco
     uint32_t flags      = args.decode_uint32();
     (void)flags;
 
-    // fore_chan_attrs: 7 uint32s + rdma_ird count
-    uint32_t fore[7];
+    // fore_chan_attrs: 6 fixed uint32s + ca_rdma_ird count (RFC 8881 §2.10.6)
+    uint32_t fore[6];
     for (auto& v : fore) v = args.decode_uint32();
     uint32_t fore_rdma_count = args.decode_uint32();
     for (uint32_t i = 0; i < fore_rdma_count; i++) args.decode_uint32();
 
     // back_chan_attrs: same layout
-    uint32_t back[7];
+    uint32_t back[6];
     for (auto& v : back) v = args.decode_uint32();
     uint32_t back_rdma_count = args.decode_uint32();
     for (uint32_t i = 0; i < back_rdma_count; i++) args.decode_uint32();
@@ -1378,6 +1386,8 @@ Nfs4Stat Nfs4Server::op_sequence(CompoundState& cs, XdrDecoder& args, XdrEncoder
 // RFC 8881 §18.51 - RECLAIM_COMPLETE
 Nfs4Stat Nfs4Server::op_reclaim_complete(CompoundState&, XdrDecoder& args, XdrEncoder&) {
     args.decode_uint32();  // rca_one_fs (bool)
+    // Client is done reclaiming — end the grace period so subsequent OPENs succeed
+    state_.end_grace_period();
     return Nfs4Stat::NFS4_OK;
 }
 
